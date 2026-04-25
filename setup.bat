@@ -49,7 +49,7 @@ if errorlevel 1 (
     echo [WARNING] Some packages failed. Trying individually...
     pip install httpx numpy edge-tts psutil schedule 2>nul
     pip install customtkinter Pillow 2>nul
-    pip install sounddevice SpeechRecognition 2>nul
+    pip install sounddevice SpeechRecognition pygame 2>nul
     pip install mss PyMuPDF 2>nul
     pip install groq 2>nul
 )

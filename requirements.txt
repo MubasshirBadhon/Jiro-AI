@@ -22,11 +22,12 @@ groq>=0.5.0
 customtkinter>=5.2.0
 Pillow>=10.2.0
 
-# --- Audio (Voice Input) ---
+# --- Audio (Voice Input + Playback) ---
 # NOTE: On Windows, sounddevice needs no extra install.
 # On Linux, install portaudio first: sudo apt install portaudio19-dev
 sounddevice>=0.4.6
 SpeechRecognition>=3.10.0
+pygame>=2.5.0
 
 # --- Screen Monitoring ---
 mss>=9.0.0

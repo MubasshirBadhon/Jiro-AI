@@ -20,7 +20,7 @@ MODELS_DIR = Path(__file__).parent.parent / "data" / "models"
 
 MODEL_TIERS = {
     "high": {
-        "name": "mistral-7b-instruct-v0.3.Q4_K_M.gguf",
+        "name": "mistral-7b-instruct-v0.2.Q4_K_M.gguf",
         "url": "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf",
         "size_gb": 4.4,
         "min_ram_gb": 16,
@@ -28,7 +28,7 @@ MODEL_TIERS = {
         "description": "Mistral 7B - Best quality offline model",
     },
     "medium": {
-        "name": "phi-3-mini-4k-instruct.Q4_K_M.gguf",
+        "name": "Phi-3-mini-4k-instruct-q4.gguf",
         "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
         "size_gb": 2.3,
         "min_ram_gb": 8,
@@ -157,7 +157,7 @@ class OfflineModelManager:
 
     async def download_model(self, tier: Optional[str] = None,
                              progress_callback=None) -> bool:
-        """Download the offline model."""
+        """Download the offline model. Tries async httpx, falls back to wget/curl."""
         if tier is None:
             caps = self.check_device_capabilities()
             tier = caps["recommended_tier"]
@@ -165,19 +165,21 @@ class OfflineModelManager:
         model_info = MODEL_TIERS.get(tier, MODEL_TIERS["low"])
         dest = self._models_dir / model_info["name"]
 
-        if dest.exists():
+        if dest.exists() and dest.stat().st_size > 1000:
             logger.info("Model already downloaded: %s", model_info["name"])
             return True
 
         logger.info("Downloading %s (%.1f GB)...", model_info["name"], model_info["size_gb"])
 
+        # Method 1: httpx async download
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=30),
+                                         follow_redirects=True) as client:
                 async with client.stream("GET", model_info["url"]) as response:
                     if response.status_code != 200:
                         logger.error("Download failed: HTTP %s", response.status_code)
-                        return False
+                        raise Exception(f"HTTP {response.status_code}")
 
                     total = int(response.headers.get("content-length", 0))
                     downloaded = 0
@@ -190,13 +192,29 @@ class OfflineModelManager:
                                 pct = (downloaded / total) * 100
                                 progress_callback(pct)
 
-            logger.info("Model downloaded: %s", model_info["name"])
-            return True
-
+            if dest.exists() and dest.stat().st_size > 1000:
+                logger.info("Model downloaded: %s", model_info["name"])
+                return True
         except Exception as e:
-            logger.error("Model download failed: %s", e)
+            logger.warning("httpx download failed, trying fallback: %s", e)
             dest.unlink(missing_ok=True)
-            return False
+
+        # Method 2: wget/curl fallback
+        for cmd in [["wget", "-O", str(dest), model_info["url"]],
+                    ["curl", "-L", "-o", str(dest), model_info["url"]]]:
+            try:
+                logger.info("Trying download with %s...", cmd[0])
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                       timeout=3600)
+                if result.returncode == 0 and dest.exists() and dest.stat().st_size > 1000:
+                    logger.info("Model downloaded via %s", cmd[0])
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+
+        logger.error("All download methods failed for %s", model_info["name"])
+        dest.unlink(missing_ok=True)
+        return False
 
     def get_status(self) -> str:
         """Get a summary of offline model status."""

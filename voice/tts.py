@@ -31,6 +31,13 @@ class TextToSpeech:
 
     def _detect_playback(self) -> str:
         """Detect best available audio playback method."""
+        # pygame is the most reliable cross-platform player for mp3
+        try:
+            import pygame
+            pygame.mixer.init()
+            return "pygame"
+        except (ImportError, Exception):
+            pass
         import shutil
         if shutil.which("ffplay"):
             return "ffplay"
@@ -46,6 +53,10 @@ class TextToSpeech:
             return "winsound"
         except ImportError:
             pass
+        # On Windows, try powershell as last resort
+        import platform
+        if platform.system() == "Windows":
+            return "powershell"
         return "none"
 
     def split_sentences(self, text: str) -> list[str]:
@@ -109,7 +120,22 @@ class TextToSpeech:
 
     async def _play(self, path: str) -> None:
         """Play audio file using best available method."""
-        if self._playback_method == "ffplay":
+        if self._playback_method == "pygame":
+            try:
+                import pygame
+                import time as _time
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+                pygame.mixer.music.load(path)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy() and not self._stop.is_set():
+                    await asyncio.sleep(0.1)
+                pygame.mixer.music.unload()
+                return
+            except Exception as e:
+                logger.warning("pygame playback failed: %s, trying fallback", e)
+
+        if self._playback_method in ("ffplay", "pygame"):  # pygame fallback to ffplay
             proc = await asyncio.create_subprocess_exec(
                 "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
@@ -159,5 +185,23 @@ class TextToSpeech:
                     sd.wait()
             except Exception as e:
                 logger.warning("Audio playback failed: %s", e)
+        elif self._playback_method == "powershell":
+            # Windows PowerShell can play media files
+            try:
+                ps_cmd = (
+                    f'Add-Type -AssemblyName presentationCore; '
+                    f'$player = New-Object System.Windows.Media.MediaPlayer; '
+                    f'$player.Open("{path}"); $player.Play(); '
+                    f'Start-Sleep -Milliseconds 500; '
+                    f'while($player.Position -lt $player.NaturalDuration.TimeSpan) {{ Start-Sleep -Milliseconds 100 }}; '
+                    f'$player.Close()'
+                )
+                proc = await asyncio.create_subprocess_exec(
+                    "powershell", "-Command", ps_cmd,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+            except Exception as e:
+                logger.warning("PowerShell playback failed: %s", e)
         else:
-            logger.warning("No audio playback method available. Install ffmpeg.")
+            logger.warning("No audio playback method available. Install pygame: pip install pygame")

@@ -96,7 +96,7 @@ class SpeechToText:
             return ""
 
     async def listen_once(self, duration: float = 5.0) -> Optional[str]:
-        """Record and transcribe. Tries Groq first, then Google, then keyboard."""
+        """Record and transcribe. Tries Google first (free), then Groq, then keyboard."""
         if self._recognizer:
             try:
                 import speech_recognition as sr
@@ -106,17 +106,17 @@ class SpeechToText:
                     self._recognizer.adjust_for_ambient_noise(source, duration=0.5)
                     audio = self._recognizer.listen(source, timeout=duration + 3, phrase_time_limit=duration)
 
-                # Try Groq first
+                # Try Google first (free, no API key needed)
+                text = self.transcribe_google(audio)
+                if text:
+                    logger.info("STT (Google): %s", text)
+                    return text
+
+                # Fallback to Groq Whisper (uses API call)
                 raw = audio.get_wav_data()
                 text = await self.transcribe_groq(raw)
                 if text:
                     logger.info("STT (Groq): %s", text)
-                    return text
-
-                # Fallback to Google
-                text = self.transcribe_google(audio)
-                if text:
-                    logger.info("STT (Google): %s", text)
                     return text
 
                 logger.warning("Could not transcribe audio")
@@ -156,10 +156,11 @@ class SpeechToText:
                             self._recognizer.adjust_for_ambient_noise(source, duration=0.3)
                             audio = self._recognizer.listen(source, timeout=10, phrase_time_limit=15)
 
-                        raw = audio.get_wav_data()
-                        text = await self.transcribe_groq(raw)
+                        # Try Google first (free), then Groq
+                        text = self.transcribe_google(audio)
                         if not text:
-                            text = self.transcribe_google(audio)
+                            raw = audio.get_wav_data()
+                            text = await self.transcribe_groq(raw)
                         if text:
                             await on_speech(text)
                     except Exception as e:
@@ -244,13 +245,7 @@ class WakeWordDetector:
                 except Exception:
                     text = ""
 
-                if not text:
-                    try:
-                        raw = audio.get_wav_data()
-                        text = (await self._stt.transcribe_groq(raw)).lower()
-                    except Exception:
-                        pass
-
+                # Only use free Google for wake word - don't waste API calls
                 if text:
                     wake_variants = [
                         self.wake_word, "jiro", "zero", "hero", "gyro",

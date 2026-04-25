@@ -290,6 +290,24 @@ class Jiro:
                 else:
                     response = "I'm already up to date!"
 
+            # Download offline model
+            elif lower in ("download model", "offline model", "download offline"):
+                await self._speak("Checking your system and downloading the best offline model...")
+                try:
+                    result = await self.self_fixer.install_offline_llm()
+                    if result.get("fixed"):
+                        dl = await self.offline_mgr.download_model(
+                            progress_callback=lambda p: logger.info("Download: %.1f%%", p)
+                        )
+                        if dl:
+                            response = "Offline model downloaded! I can now work without internet."
+                        else:
+                            response = "Model download failed. Check your internet connection and try again."
+                    else:
+                        response = f"Could not set up offline mode: {result.get('action', 'Unknown error')}"
+                except Exception as e:
+                    response = f"Offline model setup failed: {e}"
+
             # Self-fix command
             elif lower in ("fix yourself", "self fix", "diagnose"):
                 fixes = await self.self_fixer.fix_all_issues()
@@ -394,18 +412,19 @@ class Jiro:
                     response = (
                         "Here's what I can do, boss:\n\n"
                         "  Voice: Say 'Jiro' to wake me up, then speak your command\n"
-                        "  Open URLs: 'open google.com'\n"
-                        "  Open apps: 'open notepad'\n"
-                        "  Plugins: calculator, timer, notes, weather, flashcards, and 60+ more\n"
-                        "  Study: 'quiz me', flashcards, GPA calculator, study planner\n"
+                        "  Open URLs: 'open google.com' or 'open https://...'\n"
+                        "  Open apps: 'open notepad', 'open chrome'\n"
+                        "  Screenshot: 'what's on my screen' or 'analyze screen'\n"
                         "  PDF: 'analyze pdf' or 'read pdf <path>'\n"
                         "  Memory: 'remember <topic>' to search past conversations\n"
+                        "  Plugins: calculator, timer, notes, weather, flashcards, and 60+ more\n"
+                        "  Study: 'quiz me', flashcards, GPA calculator, study planner\n"
                         "  Schedule: 'my schedule', 'add event'\n"
                         "  Alarms: 'set alarm for 5pm'\n"
+                        "  Offline: 'download model' for offline AI\n"
                         "  Updates: 'update yourself'\n"
                         "  Self-fix: 'fix yourself'\n"
                         "  Health: 'health check'\n"
-                        "  Mood: 'I feel happy/sad'\n"
                         "  And much more! Just ask."
                     )
                 else:

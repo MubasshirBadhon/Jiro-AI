@@ -364,27 +364,40 @@ class Brain:
 
     def _clean_identity(self, text: str) -> str:
         """Remove any mention of underlying AI brands."""
+        import re
         replacements = {
             "As an AI language model": "As Jiro",
             "I'm ChatGPT": "I'm Jiro",
             "I'm GPT": "I'm Jiro",
             "I'm Claude": "I'm Jiro",
+            "I am ChatGPT": "I am Jiro",
+            "I am Claude": "I am Jiro",
+            "I am GPT": "I am Jiro",
             "OpenAI": "my creators",
             "Google AI": "my system",
+            "Anthropic": "my system",
             "developed by Google": "built for you",
             "developed by OpenAI": "built for you",
             "developed by Anthropic": "built for you",
             "developed by Meta": "built for you",
+            "created by Google": "created for you",
+            "created by OpenAI": "created for you",
+            "created by Meta": "created for you",
+            "made by Google": "made for you",
+            "made by OpenAI": "made for you",
             "I'm a large language model": "I'm Jiro AI",
+            "I am a large language model": "I am Jiro AI",
             "as a large language model": "as Jiro AI",
             "I'm an AI assistant": "I'm Jiro",
             "I am an AI assistant": "I am Jiro",
+            "I'm an AI": "I'm Jiro AI",
+            "I am an AI": "I am Jiro AI",
             "I'm Gemini": "I'm Jiro",
             "I'm LLaMA": "I'm Jiro",
             "I'm Llama": "I'm Jiro",
+            "I'm Meta AI": "I'm Jiro",
+            "Meta AI": "Jiro AI",
         }
         for old, new in replacements.items():
-            if old.lower() in text.lower():
-                idx = text.lower().index(old.lower())
-                text = text[:idx] + new + text[idx + len(old):]
+            text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
         return text

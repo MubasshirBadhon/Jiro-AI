@@ -1,4 +1,7 @@
-"""Groq API Handler - Fast AI responses with streaming support."""
+"""Groq API Handler - Fast AI responses with streaming support.
+
+Uses llama-3.3-70b-versatile (production) or llama-3.1-8b-instant (fast).
+"""
 
 import logging
 from typing import AsyncGenerator, Optional
@@ -42,14 +45,31 @@ class GroqHandler:
                              "Content-Type": "application/json"},
                     json={
                         "model": self._config.get("models", {}).get(
-                            "groq_generation", "llama-3.1-70b-versatile"),
+                            "groq_generation", "llama-3.3-70b-versatile"),
                         "messages": messages,
                         "max_tokens": 2048,
                         "temperature": 0.7,
                     },
                 )
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"]
+                # If model deprecated, try fallback
+                if resp.status_code == 400 or resp.status_code == 404:
+                    logger.warning("Groq model may be deprecated, trying fallback")
+                    resp2 = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}",
+                                 "Content-Type": "application/json"},
+                        json={
+                            "model": "llama-3.1-8b-instant",
+                            "messages": messages,
+                            "max_tokens": 2048,
+                            "temperature": 0.7,
+                        },
+                    )
+                    if resp2.status_code == 200:
+                        return resp2.json()["choices"][0]["message"]["content"]
                 logger.warning("Groq error %s: %s", resp.status_code, resp.text[:200])
         except Exception as e:
             logger.error("Groq failed: %s", e)
@@ -79,7 +99,7 @@ class GroqHandler:
                              "Content-Type": "application/json"},
                     json={
                         "model": self._config.get("models", {}).get(
-                            "groq_generation", "llama-3.1-70b-versatile"),
+                            "groq_generation", "llama-3.3-70b-versatile"),
                         "messages": messages,
                         "max_tokens": 2048,
                         "temperature": 0.7,

@@ -58,11 +58,20 @@ class LauncherPlugin(PluginBase):
                 webbrowser.open(url)
                 return f"Opening {name}..."
 
-        # Check URL
+        # Check URL (full or bare domain)
         url_match = re.search(r'(https?://\S+)', command)
         if url_match:
             webbrowser.open(url_match.group(1))
             return f"Opening {url_match.group(1)}..."
+
+        # Check bare domain names like "google.com", "github.io"
+        domain_match = re.search(r'((?:www\.)?[\w-]+\.(?:com|org|net|io|edu|gov|co|dev|ai|me)\S*)', target)
+        if domain_match:
+            url = domain_match.group(1)
+            if not url.startswith("http"):
+                url = "https://" + url
+            webbrowser.open(url)
+            return f"Opening {url}..."
 
         # Check apps (Windows)
         if platform.system() == "Windows":
