@@ -4,9 +4,12 @@ If something breaks, Jiro tries to fix it using:
 1. Built-in fix strategies (dependency install, config repair, etc.)
 2. Offline LLM (if available) for code-level fixes
 3. Online AI APIs for complex debugging
+
+Handles special cases like llama-cpp-python on Windows.
 """
 
 import importlib
+import json
 import logging
 import subprocess
 import sys
@@ -44,6 +47,7 @@ class SelfFixer:
             self._fix_connection_error,
             self._fix_json_error,
             self._fix_audio_error,
+            self._fix_encoding_error,
         ]
 
         for strategy in fix_strategies:
@@ -51,6 +55,8 @@ class SelfFixer:
             if fix_result["handled"]:
                 result.update(fix_result)
                 self._fix_log.append(result)
+                if result["fixed"]:
+                    logger.info("Self-fixer: Fixed! Action: %s", result["action"])
                 return result
 
         if self._ai_engine:
@@ -62,8 +68,116 @@ class SelfFixer:
         self._fix_log.append(result)
         return result
 
+    async def startup_check(self) -> list[dict]:
+        """Run startup checks and auto-fix common issues."""
+        fixes = []
+
+        # Check required packages
+        required = {
+            "httpx": "httpx",
+            "edge_tts": "edge-tts",
+            "numpy": "numpy",
+            "psutil": "psutil",
+        }
+        optional = {
+            "speech_recognition": "SpeechRecognition",
+            "sounddevice": "sounddevice",
+            "customtkinter": "customtkinter",
+            "PIL": "Pillow",
+            "mss": "mss",
+            "fitz": "PyMuPDF",
+        }
+
+        for module, package in required.items():
+            try:
+                importlib.import_module(module)
+            except ImportError:
+                fix = self._install_package(package)
+                fixes.append(fix)
+
+        for module, package in optional.items():
+            try:
+                importlib.import_module(module)
+            except ImportError:
+                logger.info("Optional package '%s' not installed. Installing...", package)
+                fix = self._install_package(package)
+                fixes.append(fix)
+
+        # Check directories
+        for d in ["data/memory", "data/recordings/screenshots", "data/models", "data/logs"]:
+            path = PROJECT_ROOT / d
+            if not path.exists():
+                path.mkdir(parents=True, exist_ok=True)
+                fixes.append({"fixed": True, "action": f"Created directory: {d}"})
+
+        # Check config.json
+        config_path = PROJECT_ROOT / "config.json"
+        if not config_path.exists():
+            self._create_default_config()
+            fixes.append({"fixed": True, "action": "Created default config.json"})
+
+        return fixes
+
+    def _install_package(self, package: str) -> dict:
+        """Install a pip package."""
+        logger.info("Installing '%s'...", package)
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", package, "-q"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                logger.info("Installed %s", package)
+                return {"fixed": True, "action": f"Installed {package}"}
+            else:
+                logger.warning("Failed to install %s: %s", package, result.stderr[:200])
+                return {"fixed": False, "action": f"Failed to install {package}"}
+        except subprocess.TimeoutExpired:
+            return {"fixed": False, "action": f"Timeout installing {package}"}
+        except Exception as e:
+            return {"fixed": False, "action": f"Error installing {package}: {e}"}
+
+    async def install_offline_llm(self) -> dict:
+        """Install llama-cpp-python with proper Windows handling."""
+        logger.info("Attempting to install llama-cpp-python for offline mode...")
+
+        # Try pre-built wheel first (faster, no build tools needed)
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "llama-cpp-python",
+                 "--prefer-binary", "-q"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                return {"fixed": True, "action": "Installed llama-cpp-python (pre-built)"}
+        except subprocess.TimeoutExpired:
+            pass
+
+        # Try CPU-only build
+        import os
+        env = os.environ.copy()
+        env["CMAKE_ARGS"] = "-DGGML_BLAS=OFF"
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "llama-cpp-python", "--no-cache-dir"],
+                capture_output=True, text=True, timeout=600, env=env,
+            )
+            if result.returncode == 0:
+                return {"fixed": True, "action": "Installed llama-cpp-python (CPU build)"}
+        except subprocess.TimeoutExpired:
+            pass
+
+        return {
+            "fixed": False,
+            "action": (
+                "Could not install llama-cpp-python. For Windows:\n"
+                "1. Install Visual Studio Build Tools from https://visualstudio.microsoft.com/visual-cpp-build-tools/\n"
+                "2. Then run: pip install llama-cpp-python\n"
+                "Jiro will work without offline mode using API keys."
+            ),
+        }
+
     async def _fix_import_error(self, error, msg: str, context: str) -> dict:
-        """Fix missing module imports by installing them."""
         if not isinstance(error, (ImportError, ModuleNotFoundError)):
             return {"handled": False}
 
@@ -83,31 +197,22 @@ class SelfFixer:
             "edge_tts": "edge-tts",
             "sounddevice": "sounddevice",
             "pyaudio": "PyAudio",
+            "speech_recognition": "SpeechRecognition",
+            "customtkinter": "customtkinter",
+            "llama_cpp": "llama-cpp-python",
         }
 
         package = package_map.get(module_name, module_name)
-        logger.info("Self-fixer: Installing missing package '%s'...", package)
 
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", package],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode == 0:
-                logger.info("Self-fixer: Successfully installed %s", package)
-                return {
-                    "handled": True,
-                    "fixed": True,
-                    "action": f"Installed missing package: {package}",
-                }
-            else:
-                return {
-                    "handled": True,
-                    "fixed": False,
-                    "action": f"Failed to install {package}: {result.stderr[:200]}",
-                }
-        except subprocess.TimeoutExpired:
-            return {"handled": True, "fixed": False, "action": f"Timeout installing {package}"}
+        if package == "llama-cpp-python":
+            return {
+                "handled": True,
+                **(await self.install_offline_llm()),
+            }
+
+        result = self._install_package(package)
+        result["handled"] = True
+        return result
 
     async def _fix_file_not_found(self, error, msg: str, context: str) -> dict:
         if not isinstance(error, FileNotFoundError):
@@ -118,7 +223,7 @@ class SelfFixer:
             return {"handled": True, "fixed": True, "action": "Created default config.json"}
 
         if "data" in msg or "memory" in msg:
-            for d in ["data/memory", "data/recordings", "data/models", "data/logs"]:
+            for d in ["data/memory", "data/recordings/screenshots", "data/models", "data/logs"]:
                 (PROJECT_ROOT / d).mkdir(parents=True, exist_ok=True)
             return {"handled": True, "fixed": True, "action": "Created missing data directories"}
 
@@ -126,7 +231,7 @@ class SelfFixer:
             return {
                 "handled": True,
                 "fixed": False,
-                "action": "ffmpeg not found. Install it: winget install ffmpeg",
+                "action": "ffmpeg not found. Install: winget install ffmpeg (Windows) or apt install ffmpeg (Linux)",
             }
 
         return {"handled": False}
@@ -135,31 +240,23 @@ class SelfFixer:
         if not isinstance(error, PermissionError):
             return {"handled": False}
         return {
-            "handled": True,
-            "fixed": False,
+            "handled": True, "fixed": False,
             "action": "Permission denied. Try running as administrator or check file permissions.",
         }
 
     async def _fix_connection_error(self, error, msg: str, context: str) -> dict:
         connection_errors = ("ConnectionError", "ConnectError", "TimeoutException",
-                             "ConnectTimeout", "ReadTimeout")
+                             "ConnectTimeout", "ReadTimeout", "HTTPStatusError")
         if type(error).__name__ not in connection_errors:
             return {"handled": False}
-
         return {
-            "handled": True,
-            "fixed": False,
-            "action": "Network connection error. Check your internet connection and try again.",
+            "handled": True, "fixed": False,
+            "action": "Network error. Check internet connection. Jiro can work offline if you download a model.",
         }
 
     async def _fix_json_error(self, error, msg: str, context: str) -> dict:
-        if not isinstance(error, (json.JSONDecodeError if hasattr(error, '__module__') else type(None),)):
-            try:
-                import json
-                if not isinstance(error, json.JSONDecodeError):
-                    return {"handled": False}
-            except Exception:
-                return {"handled": False}
+        if not isinstance(error, json.JSONDecodeError):
+            return {"handled": False}
 
         if "config.json" in context:
             self._create_default_config()
@@ -172,18 +269,25 @@ class SelfFixer:
         if not any(kw in msg.lower() for kw in audio_keywords):
             return {"handled": False}
 
+        # Try installing sounddevice
+        if "sounddevice" in msg.lower() or "portaudio" in msg.lower():
+            self._install_package("sounddevice")
+
         return {
-            "handled": True,
-            "fixed": False,
-            "action": (
-                "Audio system error. On Windows, install PortAudio or use '--cli' mode. "
-                "If using voice, ensure a microphone is connected."
-            ),
+            "handled": True, "fixed": False,
+            "action": "Audio error. Make sure a microphone is connected. Use '--cli' for text-only mode.",
+        }
+
+    async def _fix_encoding_error(self, error, msg: str, context: str) -> dict:
+        if not isinstance(error, (UnicodeDecodeError, UnicodeEncodeError)):
+            return {"handled": False}
+        return {
+            "handled": True, "fixed": False,
+            "action": "Encoding error. Try setting PYTHONIOENCODING=utf-8 environment variable.",
         }
 
     async def _ask_ai_for_fix(self, error_type: str, error_msg: str,
                                traceback_str: str, context: str) -> Optional[str]:
-        """Ask AI for help fixing an error."""
         if not self._ai_engine:
             return None
 
@@ -195,7 +299,6 @@ class SelfFixer:
                 f"Traceback (last 5 lines):\n"
                 f"{chr(10).join(traceback_str.strip().split(chr(10))[-5:])}"
             )
-
             if hasattr(self._ai_engine, 'process'):
                 response = await self._ai_engine.process(prompt)
                 return response[:500]
@@ -204,12 +307,11 @@ class SelfFixer:
         return None
 
     def _create_default_config(self) -> None:
-        """Create a default config.json."""
-        import json
         default = {
             "assistant_name": "Jiro",
             "wake_word": "jiro",
             "language": "en",
+            "supported_languages": ["en", "bn"],
             "api_keys": {"nvidia": "", "huggingface": "", "groq": "", "gemini": "", "openrouter": ""},
             "supabase": {"backend_url": "", "anon_key": ""},
             "models": {
@@ -217,10 +319,18 @@ class SelfFixer:
                 "groq_generation": "llama-3.1-70b-versatile",
                 "gemini_generation": "gemini-2.0-flash",
             },
-            "tts": {"voice": "en-US-GuyNeural", "rate": "+0%"},
-            "stt": {"model": "whisper-large-v3"},
+            "tts": {"engine": "edge-tts", "voice": "en-US-GuyNeural", "rate": "+0%"},
+            "stt": {"model": "whisper-large-v3", "silence_threshold": 2.0, "energy_threshold": 300},
+            "gui": {"always_on_top": True, "opacity": 0.95, "width": 400, "height": 600},
+            "monitoring": {"enabled": True, "screenshot_interval_seconds": 30},
+            "memory": {"max_conversation_history": 100, "persist_to_disk": True},
+            "proactive": {"enabled": True, "study_quiz_interval_minutes": 30},
+            "security": {"require_passkey": False, "passkey_hash": ""},
+            "offline": {"enabled": False, "auto_download": True},
+            "autostart": {"enabled": True, "start_minimized": True},
+            "update": {"auto_update": True, "repo_url": "https://github.com/MubasshirBadhon/Jiro-AI.git", "branch": "main"},
         }
-        with open(PROJECT_ROOT / "config.json", "w") as f:
+        with open(PROJECT_ROOT / "config.json", "w", encoding="utf-8") as f:
             json.dump(default, f, indent=4)
 
     def get_fix_log(self) -> list[dict]:
@@ -236,7 +346,7 @@ class SelfFixer:
 
         if self._ai_engine:
             try:
-                code = plugin_path.read_text()
+                code = plugin_path.read_text(encoding="utf-8")
                 prompt = (
                     f"Fix this Python plugin code. Error: {error}\n\n"
                     f"```python\n{code[:3000]}\n```\n\n"
@@ -251,21 +361,34 @@ class SelfFixer:
 
                 if "class " in fixed_code and "PluginBase" in fixed_code:
                     backup = plugin_path.with_suffix(".py.bak")
-                    plugin_path.rename(backup)
-                    plugin_path.write_text(fixed_code)
+                    import shutil
+                    shutil.copy2(plugin_path, backup)
+                    plugin_path.write_text(fixed_code, encoding="utf-8")
 
                     try:
-                        spec = importlib.util.spec_from_file_location(plugin_path.stem, plugin_path)
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-                        logger.info("Plugin fixed successfully: %s", plugin_path.name)
-                        backup.unlink()
-                        return {"handled": True, "fixed": True, "action": "AI fixed the plugin code"}
+                        importlib.import_module(f"plugins.{plugin_path.stem}")
+                        return {"handled": True, "fixed": True,
+                                "action": f"AI-fixed plugin: {plugin_path.name}"}
                     except Exception:
-                        plugin_path.unlink()
-                        backup.rename(plugin_path)
-                        return {"handled": True, "fixed": False, "action": "AI fix didn't work, restored backup"}
+                        shutil.copy2(backup, plugin_path)
+                        return {"handled": True, "fixed": False,
+                                "action": f"AI fix attempt failed for {plugin_path.name}"}
             except Exception as e:
-                logger.error("AI fix attempt failed: %s", e)
+                logger.warning("AI fix for plugin failed: %s", e)
 
-        return {"handled": True, "fixed": False, "action": "Could not auto-fix plugin"}
+        return {"handled": True, "fixed": False,
+                "action": f"Could not auto-fix {plugin_path.name}: {error}"}
+
+    async def fix_all_issues(self) -> list[dict]:
+        """Run all diagnostic checks and fix what we can."""
+        fixes = await self.startup_check()
+
+        # Check ffmpeg
+        import shutil
+        if not shutil.which("ffmpeg") and not shutil.which("ffplay"):
+            fixes.append({
+                "fixed": False,
+                "action": "ffmpeg not found. TTS audio may not play. Install: winget install ffmpeg",
+            })
+
+        return fixes

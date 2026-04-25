@@ -11,6 +11,8 @@ Usage:
     python main.py --setup      # Interactive first-time setup
     python main.py --dashboard  # Show monitoring dashboard
     python main.py --set-passkey # Set/change passkey
+    python main.py --update     # Check for updates from GitHub
+    python main.py --fix        # Run self-fixer diagnostics
 """
 
 import argparse
@@ -29,6 +31,7 @@ from core.api_key_manager import APIKeyManager
 from core.health_checker import HealthChecker
 from core.self_fixer import SelfFixer
 from core.offline_model_manager import OfflineModelManager
+from core.auto_updater import AutoUpdater
 from voice.stt import SpeechToText, WakeWordDetector
 from voice.tts import TextToSpeech
 from ai.brain import Brain
@@ -68,8 +71,8 @@ logger = logging.getLogger("jiro")
 def load_config() -> dict:
     config_path = PROJECT_ROOT / "config.json"
     if not config_path.exists():
-        logger.error("config.json not found! Run: python main.py --setup")
-        sys.exit(1)
+        SelfFixer({})._create_default_config()
+        logger.info("Created default config.json")
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -89,6 +92,7 @@ class Jiro:
         self.api_keys = APIKeyManager(self.config)
         self.passkey = PasskeyManager(self.config)
         self.offline_mgr = OfflineModelManager(self.config)
+        self.updater = AutoUpdater(self.config)
 
         # AI
         self.brain = Brain(self.config, self.api_keys)
@@ -130,17 +134,36 @@ class Jiro:
         self._shutdown = asyncio.Event()
 
     async def initialize(self) -> None:
-        """Initialize all components."""
-        # Load API keys from Supabase if configured
-        await self.api_keys.fetch_from_supabase()
+        """Initialize all components with self-fixing."""
+        # Auto-update check
+        update_msg = self.updater.auto_update_on_start()
+        if update_msg:
+            logger.info(update_msg)
 
-        # Load plugins
+        # Run self-fixer startup checks
+        fixes = await self.self_fixer.startup_check()
+        for fix in fixes:
+            if fix.get("action"):
+                logger.info("Startup fix: %s", fix["action"])
+
+        # Load API keys from Supabase if configured
+        try:
+            await self.api_keys.fetch_from_supabase()
+        except Exception as e:
+            logger.warning("Supabase fetch skipped: %s", e)
+
+        # Check available providers
+        providers = self.brain.get_available_providers()
+        if not providers:
+            logger.warning("No AI providers configured! Run: python main.py --setup")
+
+        # Load plugins with error recovery
         self.plugins.load_all()
         plugin_list = self.plugins.list_plugins()
         logger.info("Loaded %d plugins: %s", len(plugin_list), [p["name"] for p in plugin_list])
 
         # Check for missing API keys in plugins
-        missing_keys = self.api_prompter.check_all_plugins(plugin_list)
+        self.api_prompter.check_all_plugins(plugin_list)
 
         # Wire up monitoring callbacks
         self.screen.on_activity_change(self._on_activity)
@@ -152,22 +175,21 @@ class Jiro:
             {"role": c["role"], "content": c["content"]} for c in history
         ]
 
-        logger.info("Jiro AI initialized successfully!")
+        logger.info("Jiro AI initialized! (%d providers, %d plugins)",
+                     len(providers), len(plugin_list))
 
     async def _on_activity(self, activity: dict) -> None:
         """Handle activity changes from screen monitor."""
         self.activity.record(activity)
         self.trainer.learn_from_activity(activity)
 
-        # Check for distractions
-        if activity["category"] == "distraction":
+        if activity.get("category") == "distraction":
             warning = await self.tab_ctrl.handle_distraction(
-                activity["window"], activity["duration"]
+                activity.get("window", ""), activity.get("duration", 0)
             )
             if warning:
                 await self._speak(warning)
 
-        # Check study topics for auto-quiz
         unquizzed = self.activity.get_unquizzed_topics()
         if unquizzed:
             from datetime import datetime
@@ -184,14 +206,15 @@ class Jiro:
                 self.activity.mark_quizzed(topic["topic"])
 
     async def _on_alarm(self, alarm: dict) -> None:
-        """Handle triggered alarms."""
         await self._speak(f"Alarm! {alarm['message']}")
 
     async def _speak(self, text: str) -> None:
-        """Speak and display text."""
         if self.gui:
             self.gui.display("Jiro", text)
-        await self.tts.speak(text)
+        try:
+            await self.tts.speak(text)
+        except Exception as e:
+            logger.warning("TTS error: %s", e)
 
     async def process(self, text: str) -> str:
         """Process user input through the full pipeline."""
@@ -202,72 +225,118 @@ class Jiro:
             self.gui.set_status("Thinking...", "#ffaa00")
 
         try:
+            # Identity commands
+            lower = text.lower().strip()
+
+            if lower in ("who are you", "what is your name", "what's your name", "tumi ke"):
+                response = ("I'm Jiro AI, pronounced like 'Zero'. I'm your personal AI assistant, "
+                            "like JARVIS but for your daily life. How can I help you, boss?")
+
+            # Update command
+            elif lower in ("update", "update yourself", "check for updates"):
+                check = self.updater.check_for_updates()
+                if check.get("available"):
+                    result = self.updater.update()
+                    response = result["message"]
+                else:
+                    response = "I'm already up to date!"
+
+            # Self-fix command
+            elif lower in ("fix yourself", "self fix", "diagnose"):
+                fixes = await self.self_fixer.fix_all_issues()
+                fixed = [f for f in fixes if f.get("fixed")]
+                failed = [f for f in fixes if not f.get("fixed") and f.get("action")]
+                parts = []
+                if fixed:
+                    parts.append(f"Fixed {len(fixed)} issues: " +
+                                 ", ".join(f["action"] for f in fixed))
+                if failed:
+                    parts.append(f"Could not fix: " +
+                                 ", ".join(f["action"] for f in failed))
+                if not parts:
+                    parts.append("Everything looks good! No issues found.")
+                response = " ".join(parts)
+
             # Check for reminder extraction
-            if self.reminders.should_extract(text):
+            elif self.reminders.should_extract(text):
                 extracted = self.reminders.extract_and_set(text)
                 if extracted:
-                    for r in extracted:
-                        from datetime import datetime
-                        t = datetime.fromisoformat(r["time"])
-                        await self._speak(f"I've set a reminder for {t.strftime('%I:%M %p')}.")
-
-            # Check plugins first
-            plugin = self.plugins.find_match(text)
-            if plugin:
-                logger.info("Routing to plugin: %s", plugin.name)
-                response = await plugin.execute(text)
-            # Check special commands
-            elif any(w in text.lower() for w in ["schedule", "free", "busy", "calendar"]):
-                response = self.schedule.format_today()
-            elif any(w in text.lower() for w in ["alarm", "remind", "timer"]):
-                alarm = self.alarms.set_alarm(text)
-                if alarm:
                     from datetime import datetime
-                    t = datetime.fromisoformat(alarm["time"])
-                    response = f"Alarm set for {t.strftime('%I:%M %p')}!"
+                    msgs = []
+                    for r in extracted:
+                        t = datetime.fromisoformat(r["time"])
+                        msgs.append(f"reminder for {t.strftime('%I:%M %p')}")
+                    response = f"I've set a {', '.join(msgs)}."
+                    response += " " + await self.brain.process(text)
                 else:
                     response = await self.brain.process(text)
-            elif any(w in text.lower() for w in ["pdf", "analyze pdf", "read pdf"]):
-                path = self.pdf.extract_path(text)
-                if path:
-                    response = await self.pdf.analyze(path)
-                else:
-                    response = "Please provide a PDF file path."
-            elif text.lower() in ("health", "health check", "status"):
-                report = await self.health.full_check()
-                response = self.health.format_report(report)
-            elif text.lower() in ("dashboard", "stats", "activity"):
-                response = self.dashboard.format_dashboard()
-            elif text.lower() in ("plugins", "list plugins"):
-                plugins = self.plugins.list_plugins()
-                response = "Loaded plugins:\n" + "\n".join(
-                    f"  [{'+' if p['enabled'] else '-'}] {p['name']}: {p['description']}"
-                    for p in plugins
-                )
-            elif text.lower().startswith("generate plugin"):
-                desc = text[len("generate plugin"):].strip()
-                if desc:
-                    path = await self.plugin_gen.generate_plugin(desc)
-                    if path:
-                        self.plugins.reload_all()
-                        response = f"Plugin generated and loaded: {path.name}"
-                    else:
-                        response = "Failed to generate plugin."
-                else:
-                    response = "Describe the plugin. Example: 'generate plugin weather checker'"
-            elif text.lower() == "insights":
-                response = self.trainer.get_insights()
+
+            # Check plugins
             else:
-                response = await self.brain.process(text)
+                plugin = self.plugins.find_match(text)
+                if plugin:
+                    logger.info("Routing to plugin: %s", plugin.name)
+                    try:
+                        response = await plugin.execute(text)
+                    except Exception as e:
+                        fix = await self.self_fixer.fix_plugin(
+                            Path(f"plugins/{type(plugin).__module__.split('.')[-1]}.py"), e
+                        )
+                        response = f"Plugin error. {fix.get('action', str(e))}"
+
+                elif any(w in lower for w in ["schedule", "free", "busy", "calendar"]):
+                    response = self.schedule.format_today()
+                elif any(w in lower for w in ["alarm", "remind", "timer"]):
+                    alarm = self.alarms.set_alarm(text)
+                    if alarm:
+                        from datetime import datetime
+                        t = datetime.fromisoformat(alarm["time"])
+                        response = f"Alarm set for {t.strftime('%I:%M %p')}!"
+                    else:
+                        response = await self.brain.process(text)
+                elif any(w in lower for w in ["pdf", "analyze pdf", "read pdf"]):
+                    path = self.pdf.extract_path(text)
+                    if path:
+                        response = await self.pdf.analyze(path)
+                    else:
+                        response = "Please provide a PDF file path."
+                elif lower in ("health", "health check", "status"):
+                    report = await self.health.full_check()
+                    response = self.health.format_report(report)
+                elif lower in ("dashboard", "stats", "activity"):
+                    response = self.dashboard.format_dashboard()
+                elif lower in ("plugins", "list plugins"):
+                    plugins = self.plugins.list_plugins()
+                    response = "Loaded plugins:\n" + "\n".join(
+                        f"  [{'+' if p['enabled'] else '-'}] {p['name']}: {p['description']}"
+                        for p in plugins
+                    )
+                elif lower.startswith("generate plugin"):
+                    desc = text[len("generate plugin"):].strip()
+                    if desc:
+                        path = await self.plugin_gen.generate_plugin(desc)
+                        if path:
+                            self.plugins.reload_all()
+                            response = f"Plugin generated and loaded: {path.name}"
+                        else:
+                            response = "Failed to generate plugin."
+                    else:
+                        response = "Describe the plugin. Example: 'generate plugin weather checker'"
+                elif lower == "insights":
+                    response = self.trainer.get_insights()
+                else:
+                    response = await self.brain.process(text)
 
         except Exception as e:
             logger.error("Processing error: %s", e)
             fix = await self.self_fixer.diagnose_and_fix(e, context=f"processing: {text}")
             if fix.get("fixed"):
-                response = f"I fixed an issue ({fix['action']}) and am retrying..."
-                response = await self.brain.process(text)
+                try:
+                    response = await self.brain.process(text)
+                except Exception:
+                    response = f"I fixed an issue ({fix['action']}) but still having trouble. Try again?"
             else:
-                response = f"I encountered an error: {e}. {fix.get('action', '')}"
+                response = f"Sorry boss, I hit an error: {fix.get('action', str(e))}"
 
         self.short_memory.add("assistant", response)
         self.long_memory.add_conversation("assistant", response)
@@ -277,7 +346,10 @@ class Jiro:
             self.gui.display("Jiro", response)
             self.gui.set_status("Online", "#00ff88")
 
-        asyncio.create_task(self.tts.speak(response))
+        try:
+            asyncio.create_task(self.tts.speak(response))
+        except Exception:
+            pass
         return response
 
     async def _on_text(self, text: str) -> None:
@@ -294,19 +366,18 @@ class Jiro:
         logger.info("Wake word detected!")
         if self.gui:
             self.gui.set_status("Active", "#00ff88")
-        await self._speak("Yes? I'm listening.")
+        await self._speak("Yes boss? I'm listening.")
 
         async def on_speech(text):
             await self.process(text)
+            self.wake_word.deactivate()
 
         await self.stt.listen_continuous(on_speech)
 
     async def run_gui(self) -> None:
         """Run with full GUI."""
-        # Permissions check
         perms = self.permissions.check_all_permissions(use_gui=True)
 
-        # Passkey check
         if not self.passkey.authenticate_gui():
             logger.error("Authentication failed")
             print("Authentication failed. Exiting.")
@@ -321,7 +392,6 @@ class Jiro:
             on_voice_stop=self._on_voice_stop,
         )
 
-        # Start background tasks
         tasks = []
         if self.permissions.is_granted("screen_monitoring"):
             tasks.append(asyncio.create_task(self.screen.run()))
@@ -329,6 +399,11 @@ class Jiro:
 
         if self.permissions.is_granted("microphone"):
             tasks.append(asyncio.create_task(self.wake_word.start(self._on_wake)))
+
+        # Greet user
+        asyncio.create_task(self._speak(
+            "Jiro AI online. Ready to assist you, boss."
+        ))
 
         self.gui.run_threaded()
 
@@ -354,15 +429,19 @@ class Jiro:
 
         await self.initialize()
 
-        # Start alarm loop in background
         alarm_task = asyncio.create_task(self.alarms.alarm_loop())
 
-        print("\n" + "=" * 45)
-        print("  JIRO AI - CLI Mode")
-        print("=" * 45)
-        print("  Commands: health, dashboard, plugins, insights,")
-        print("  generate plugin <desc>, quit")
-        print("=" * 45 + "\n")
+        print("\n" + "=" * 50)
+        print("  JIRO AI - CLI Mode (pronounced 'Zero')")
+        print("=" * 50)
+        print("  I'm Jiro, your personal AI assistant.")
+        providers = self.brain.get_available_providers()
+        print(f"  Active providers: {', '.join(providers) if providers else 'NONE - run --setup'}")
+        print(f"  Loaded plugins: {len(self.plugins.list_plugins())}")
+        print()
+        print("  Commands: voice, health, dashboard, plugins,")
+        print("  insights, update, fix yourself, generate plugin <desc>, quit")
+        print("=" * 50 + "\n")
 
         while True:
             try:
@@ -370,16 +449,27 @@ class Jiro:
                     None, lambda: input("You: ")
                 )
                 if user_input.lower() in ("quit", "exit", "bye"):
-                    print("Jiro: Goodbye! See you later.")
+                    print("\nJiro: Goodbye boss! See you later.")
                     break
                 if not user_input.strip():
                     continue
+
+                # Voice input mode
+                if user_input.lower() == "voice":
+                    print("Jiro: I'm listening... (speak now)")
+                    text = await self.stt.listen_once(duration=8.0)
+                    if text:
+                        print(f"  [Heard: {text}]")
+                        user_input = text
+                    else:
+                        print("  [Could not hear anything. Try again or type instead.]")
+                        continue
 
                 response = await self.process(user_input)
                 print(f"\nJiro: {response}\n")
 
             except (KeyboardInterrupt, EOFError):
-                print("\nJiro: Goodbye!")
+                print("\nJiro: Goodbye boss!")
                 break
 
         alarm_task.cancel()
@@ -390,11 +480,48 @@ class Jiro:
         report = await self.health.full_check()
         print(self.health.format_report(report))
 
+    async def run_fix(self) -> None:
+        """Run self-fixer diagnostics."""
+        print("\n--- Jiro AI Self-Fixer ---\n")
+        fixes = await self.self_fixer.fix_all_issues()
+        for fix in fixes:
+            status = "FIXED" if fix.get("fixed") else "INFO"
+            print(f"  [{status}] {fix.get('action', 'Unknown')}")
+        print(f"\nTotal: {len(fixes)} items checked")
+
+    async def run_update(self) -> None:
+        """Check for and apply updates."""
+        print("\n--- Jiro AI Auto-Updater ---\n")
+        check = self.updater.check_for_updates()
+        if check.get("available"):
+            print(f"  {check['commits']} new update(s) available!")
+            for detail in check.get("details", []):
+                print(f"    {detail}")
+            confirm = input("\n  Apply updates? (y/n): ").strip().lower()
+            if confirm == "y":
+                result = self.updater.update()
+                print(f"  {result['message']}")
+            else:
+                print("  Skipped.")
+        elif check.get("error"):
+            print(f"  Error: {check['error']}")
+        else:
+            print("  Already up to date!")
+
     async def run_setup(self) -> None:
         """Interactive first-time setup."""
         print("\n" + "=" * 50)
         print("  JIRO AI - First Time Setup")
+        print("  (Your personal JARVIS-like assistant)")
         print("=" * 50)
+
+        # Startup fixes first
+        print("\n--- Auto-fixing dependencies ---")
+        fixes = await self.self_fixer.startup_check()
+        for fix in fixes:
+            if fix.get("action"):
+                status = "OK" if fix.get("fixed") else "WARN"
+                print(f"  [{status}] {fix['action']}")
 
         # Permissions
         print("\n--- Permissions ---")
@@ -402,11 +529,19 @@ class Jiro:
 
         # API Keys
         print("\n--- API Keys ---")
+        print("  Get free API keys from:")
+        print("    Groq (recommended): https://console.groq.com")
+        print("    Gemini: https://aistudio.google.com")
+        print("    NVIDIA: https://build.nvidia.com")
+        print("    HuggingFace: https://huggingface.co/settings/tokens")
+        print("    OpenRouter: https://openrouter.ai/keys")
+        print()
+
         providers = ["groq", "gemini", "nvidia", "huggingface", "openrouter"]
         for provider in providers:
             current = self.config.get("api_keys", {}).get(provider, "")
             if current:
-                print(f"  {provider}: configured")
+                print(f"  {provider}: already configured")
             else:
                 key = input(f"  Enter {provider} API key (Enter to skip): ").strip()
                 if key:
@@ -414,7 +549,7 @@ class Jiro:
                     print(f"  {provider}: saved!")
 
         # Supabase
-        print("\n--- Supabase (optional) ---")
+        print("\n--- Supabase (optional - for remote config) ---")
         for field in ["backend_url", "anon_key"]:
             current = self.config.get("supabase", {}).get(field, "")
             if not current:
@@ -423,7 +558,7 @@ class Jiro:
                     self.config.setdefault("supabase", {})[field] = val
 
         # Save config
-        with open(PROJECT_ROOT / "config.json", "w") as f:
+        with open(PROJECT_ROOT / "config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4)
 
         # Passkey
@@ -442,18 +577,23 @@ class Jiro:
         print(f"  {self.offline_mgr.get_status()}")
         dl = input("  Download offline model? (y/n): ").strip().lower()
         if dl == "y":
-            await self.offline_mgr.download_model(
-                progress_callback=lambda p: print(f"\r  Downloading: {p:.1f}%", end="")
-            )
-            print("\n  Done!")
+            # Try to install llama-cpp-python first
+            result = await self.self_fixer.install_offline_llm()
+            print(f"  {result['action']}")
+            if result.get("fixed"):
+                await self.offline_mgr.download_model(
+                    progress_callback=lambda p: print(f"\r  Downloading: {p:.1f}%", end="")
+                )
+                print("\n  Done!")
 
         # Health check
-        print("\n--- Health Check ---")
+        print("\n--- Final Health Check ---")
         report = await self.health.full_check()
         print(self.health.format_report(report))
 
         print("\n" + "=" * 50)
         print("  Setup complete! Run: python main.py")
+        print("  Or for text-only: python main.py --cli")
         print("=" * 50 + "\n")
 
     def shutdown(self) -> None:
@@ -468,6 +608,8 @@ def main():
     parser.add_argument("--setup", action="store_true", help="First-time setup")
     parser.add_argument("--dashboard", action="store_true", help="Show dashboard")
     parser.add_argument("--set-passkey", action="store_true", help="Set/change passkey")
+    parser.add_argument("--update", action="store_true", help="Check for updates")
+    parser.add_argument("--fix", action="store_true", help="Run self-fixer")
     args = parser.parse_args()
 
     jiro = Jiro()
@@ -483,6 +625,10 @@ def main():
         asyncio.run(jiro.run_health())
     elif args.setup:
         asyncio.run(jiro.run_setup())
+    elif args.update:
+        asyncio.run(jiro.run_update())
+    elif args.fix:
+        asyncio.run(jiro.run_fix())
     elif args.dashboard:
         print(jiro.dashboard.format_dashboard())
     elif args.set_passkey:

@@ -88,5 +88,11 @@
         "enabled": true,
         "start_minimized": true,
         "background_mode": true
+    },
+
+    "update": {
+        "auto_update": true,
+        "repo_url": "https://github.com/MubasshirBadhon/Jiro-AI.git",
+        "branch": "main"
     }
 }
