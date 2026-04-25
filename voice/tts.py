@@ -22,7 +22,7 @@ class TextToSpeech:
         self._config = config
         tts_config = config.get("tts", {})
         self.voice = tts_config.get("voice", "en-US-GuyNeural")
-        self.rate = tts_config.get("rate", "+0%")
+        self.rate = tts_config.get("rate", "+15%")  # Slightly faster for natural feel
         self.volume = tts_config.get("volume", "+0%")
         self.is_speaking = False
         self._stop = asyncio.Event()

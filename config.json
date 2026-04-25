@@ -29,7 +29,7 @@
     "tts": {
         "engine": "edge-tts",
         "voice": "en-US-GuyNeural",
-        "rate": "+0%",
+        "rate": "+15%",
         "volume": "+0%"
     },
 
@@ -88,6 +88,12 @@
         "enabled": true,
         "start_minimized": true,
         "background_mode": true
+    },
+
+    "api": {
+        "rate_limit_per_min": 20,
+        "cache_ttl_seconds": 300,
+        "smart_routing": true
     },
 
     "update": {

@@ -1,18 +1,21 @@
 """Brain - Central AI orchestrator for Jiro AI.
 
-Routes tasks to the best available AI provider with automatic fallback.
+Routes tasks to the best available AI provider with smart fallback.
 Always maintains Jiro's identity - never reveals underlying APIs.
+Uses API keys conservatively - caches, skips analysis for simple tasks.
 
 Flow:
-  User Prompt → NVIDIA (understand + classify) → Route to handlers
-  General → Groq + Gemini parallel → Combined response
-  Heavy → HuggingFace
+  Simple tasks → Local plugins (no API call)
+  General → Single best provider (Groq OR Gemini, not both)
+  Heavy/complex → Parallel Groq+Gemini → Combined
   Fallback → OpenRouter → Offline LLM
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 from typing import AsyncGenerator, Optional
 
 from ai.groq_handler import GroqHandler
@@ -57,6 +60,12 @@ class Brain:
         self.max_history = 100
         self.system_prompt = SYSTEM_PROMPT
         self._available_providers: list[str] = []
+        self._response_cache: dict[str, tuple[str, float]] = {}
+        self._cache_ttl = 300  # 5 min cache
+        self._api_call_count = 0
+        self._api_call_reset = time.time()
+        self._rate_limit_per_min = config.get("api", {}).get("rate_limit_per_min", 20)
+        self._failed_tasks: list[dict] = []
         self._check_providers()
 
     def _check_providers(self) -> None:
@@ -82,10 +91,70 @@ class Brain:
         self._check_providers()
         return self._available_providers
 
+    def _check_rate_limit(self) -> bool:
+        """Check if we're within API rate limits. Returns True if OK to call."""
+        now = time.time()
+        if now - self._api_call_reset > 60:
+            self._api_call_count = 0
+            self._api_call_reset = now
+        return self._api_call_count < self._rate_limit_per_min
+
+    def _cache_key(self, text: str) -> str:
+        return hashlib.md5(text.lower().strip().encode()).hexdigest()
+
+    def _get_cached(self, text: str) -> Optional[str]:
+        """Get cached response if available and not expired."""
+        key = self._cache_key(text)
+        if key in self._response_cache:
+            resp, ts = self._response_cache[key]
+            if time.time() - ts < self._cache_ttl:
+                logger.info("Cache hit - saved API call")
+                return resp
+            del self._response_cache[key]
+        return None
+
+    def _set_cache(self, text: str, response: str) -> None:
+        self._response_cache[self._cache_key(text)] = (response, time.time())
+        if len(self._response_cache) > 500:
+            oldest = min(self._response_cache, key=lambda k: self._response_cache[k][1])
+            del self._response_cache[oldest]
+
+    def log_failed_task(self, task: str, error: str) -> None:
+        """Log a failed task for self-improvement learning."""
+        self._failed_tasks.append({
+            "task": task, "error": error, "time": time.time(),
+        })
+        if len(self._failed_tasks) > 100:
+            self._failed_tasks = self._failed_tasks[-50:]
+
+    def get_failed_tasks(self) -> list[dict]:
+        return self._failed_tasks
+
+    def _is_simple_task(self, prompt: str) -> bool:
+        """Check if a prompt is simple enough to skip NVIDIA analysis."""
+        lower = prompt.lower().strip()
+        simple_patterns = [
+            "who are you", "what is your name", "hello", "hi", "hey",
+            "thanks", "thank you", "bye", "good morning", "good night",
+            "how are you", "what time", "what date", "ok", "yes", "no",
+        ]
+        if lower in simple_patterns or len(lower.split()) <= 3:
+            return True
+        return False
+
     async def analyze_task(self, prompt: str) -> dict:
-        """Use NVIDIA API to understand and classify the prompt."""
+        """Classify the prompt. Skips API for simple tasks to save quota."""
         default = {"task_type": "general", "sub_tasks": [prompt],
                     "requires_heavy_compute": False, "original": prompt}
+
+        # Skip analysis for simple/short prompts
+        if self._is_simple_task(prompt):
+            return default
+
+        # Check rate limit before API call
+        if not self._check_rate_limit():
+            logger.info("Rate limit reached, skipping NVIDIA analysis")
+            return default
 
         api_key = self._get_key("nvidia")
         if not api_key:
@@ -93,6 +162,7 @@ class Brain:
 
         try:
             import httpx
+            self._api_call_count += 1
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     "https://integrate.api.nvidia.com/v1/chat/completions",
@@ -125,32 +195,60 @@ class Brain:
         return default
 
     async def process(self, user_input: str, context: Optional[dict] = None) -> str:
-        """Process input through the multi-provider pipeline with smart fallback."""
+        """Process input through the multi-provider pipeline with smart API usage.
+
+        Smart API strategy for free tier:
+        - Check cache first (avoid duplicate calls)
+        - Use single provider for simple tasks (not parallel)
+        - Only use parallel for complex/important queries
+        - Track rate limits and back off when needed
+        """
+        # Check cache first
+        cached = self._get_cached(user_input)
+        if cached:
+            self.conversation_history.append({"role": "user", "content": user_input})
+            self.conversation_history.append({"role": "assistant", "content": cached})
+            return cached
+
         self.conversation_history.append({"role": "user", "content": user_input})
         if len(self.conversation_history) > self.max_history:
             self.conversation_history = self.conversation_history[-self.max_history:]
 
-        history = self.conversation_history[-20:]
+        # Use limited history to save tokens
+        history = self.conversation_history[-10:]
 
-        task = await self.analyze_task(user_input)
-        task_type = task.get("task_type", "general")
-        heavy = task.get("requires_heavy_compute", False)
+        # Skip NVIDIA analysis for simple tasks to save API calls
+        is_simple = self._is_simple_task(user_input)
+        if is_simple:
+            task_type = "general"
+            heavy = False
+        else:
+            task = await self.analyze_task(user_input)
+            task_type = task.get("task_type", "general")
+            heavy = task.get("requires_heavy_compute", False)
 
-        logger.info("Task: type=%s heavy=%s", task_type, heavy)
+        logger.info("Task: type=%s heavy=%s simple=%s", task_type, heavy, is_simple)
 
         response = ""
 
         # Heavy tasks: try HuggingFace first
         if heavy and self._get_key("huggingface"):
-            response = await self.huggingface.generate(user_input)
+            if self._check_rate_limit():
+                self._api_call_count += 1
+                response = await self.huggingface.generate(user_input)
 
-        # Standard flow: Groq + Gemini parallel, then combine
+        # Smart provider selection: use SINGLE provider for most tasks
         if not response:
             groq_key = self._get_key("groq")
             gemini_key = self._get_key("gemini")
 
-            if groq_key and gemini_key:
+            # For complex prompts (long, multi-part): try parallel if both available
+            use_parallel = (not is_simple and len(user_input.split()) > 20
+                           and groq_key and gemini_key and self._check_rate_limit())
+
+            if use_parallel:
                 try:
+                    self._api_call_count += 2
                     groq_resp, gemini_resp = await asyncio.gather(
                         self.groq.generate(user_input, self.system_prompt, history),
                         self.gemini.generate(user_input, self.system_prompt, history),
@@ -170,16 +268,20 @@ class Brain:
                 except Exception as e:
                     logger.warning("Parallel generation failed: %s", e)
 
-            elif groq_key:
+            # Single provider for normal tasks (saves API quota)
+            elif groq_key and self._check_rate_limit():
+                self._api_call_count += 1
                 response = await self.groq.generate(user_input, self.system_prompt, history)
-            elif gemini_key:
+            elif gemini_key and self._check_rate_limit():
+                self._api_call_count += 1
                 response = await self.gemini.generate(user_input, self.system_prompt, history)
 
         # Fallback: OpenRouter
-        if not response and self._get_key("openrouter"):
+        if not response and self._get_key("openrouter") and self._check_rate_limit():
+            self._api_call_count += 1
             response = await self._openrouter_generate(user_input, history)
 
-        # Last resort: Offline LLM
+        # Last resort: Offline LLM (no API call needed)
         if not response and self.offline.is_available():
             response = await self.offline.generate(user_input, self.system_prompt, history)
 
@@ -192,9 +294,13 @@ class Brain:
             else:
                 response = ("Sorry boss, I couldn't process that right now. "
                             "Let me try again or ask in a different way.")
+                self.log_failed_task(user_input, "All providers failed")
 
         # Clean response of any AI branding
         response = self._clean_identity(response)
+
+        # Cache the response
+        self._set_cache(user_input, response)
 
         self.conversation_history.append({"role": "assistant", "content": response})
         return response

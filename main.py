@@ -169,14 +169,21 @@ class Jiro:
         self.screen.on_activity_change(self._on_activity)
         self.alarms.on_alarm(self._on_alarm)
 
-        # Restore conversation history from long-term memory
-        history = self.long_memory.get_conversations(20)
-        self.brain.conversation_history = [
-            {"role": c["role"], "content": c["content"]} for c in history
-        ]
+        # Restore conversation history from long-term memory across sessions
+        history = self.long_memory.get_conversations(30)
+        if history:
+            self.brain.conversation_history = [
+                {"role": c["role"], "content": c["content"]} for c in history
+            ]
+            logger.info("Restored %d messages from memory", len(history))
 
-        logger.info("Jiro AI initialized! (%d providers, %d plugins)",
-                     len(providers), len(plugin_list))
+        # Load learned patterns for context
+        failed_tasks = self.long_memory.get_patterns("failed_task", 10)
+        for ft in failed_tasks:
+            self.brain.log_failed_task(ft["data"].get("task", ""), ft["data"].get("error", ""))
+
+        logger.info("Jiro AI initialized! (%d providers, %d plugins, %d memories)",
+                     len(providers), len(plugin_list), len(history))
 
     async def _on_activity(self, activity: dict) -> None:
         """Handle activity changes from screen monitor."""
@@ -231,6 +238,48 @@ class Jiro:
             if lower in ("who are you", "what is your name", "what's your name", "tumi ke"):
                 response = ("I'm Jiro AI, pronounced like 'Zero'. I'm your personal AI assistant, "
                             "like JARVIS but for your daily life. How can I help you, boss?")
+
+            # Open URL / website commands
+            elif lower.startswith(("open ", "go to ", "visit ", "browse ")) and (
+                "http" in lower or ".com" in lower or ".org" in lower or
+                ".net" in lower or ".io" in lower or "www." in lower
+            ):
+                import re as _re
+                url_match = _re.search(r'(https?://\S+|www\.\S+|\S+\.(?:com|org|net|io|edu|gov)\S*)', text)
+                if url_match:
+                    url = url_match.group(1)
+                    if not url.startswith("http"):
+                        url = "https://" + url
+                    try:
+                        import webbrowser
+                        webbrowser.open(url)
+                        response = f"Opening {url} in your browser!"
+                    except Exception as e:
+                        response = f"Could not open browser: {e}"
+                else:
+                    response = "I couldn't find a URL in your command. Try: 'open https://google.com'"
+
+            # Open apps
+            elif lower.startswith(("open ", "launch ", "start ")) and "http" not in lower:
+                import re as _re
+                app_name = _re.sub(r'^(open|launch|start)\s+', '', lower).strip()
+                if app_name:
+                    plugin = self.plugins.find_match(text)
+                    if plugin:
+                        response = await plugin.execute(text)
+                    else:
+                        try:
+                            import subprocess as _sp
+                            import platform as _plat
+                            if _plat.system() == "Windows":
+                                _sp.Popen(["start", app_name], shell=True)
+                            else:
+                                _sp.Popen(["xdg-open", app_name])
+                            response = f"Opening {app_name}!"
+                        except Exception as e:
+                            response = f"Could not open {app_name}: {e}"
+                else:
+                    response = await self.brain.process(text)
 
             # Update command
             elif lower in ("update", "update yourself", "check for updates"):
@@ -297,9 +346,10 @@ class Jiro:
                 elif any(w in lower for w in ["pdf", "analyze pdf", "read pdf"]):
                     path = self.pdf.extract_path(text)
                     if path:
-                        response = await self.pdf.analyze(path)
+                        response = await self.pdf.analyze(path, text)
                     else:
-                        response = "Please provide a PDF file path."
+                        # Try to find and analyze the most recent PDF
+                        response = await self.pdf.analyze_recent(text)
                 elif lower in ("health", "health check", "status"):
                     report = await self.health.full_check()
                     response = self.health.format_report(report)
@@ -324,11 +374,49 @@ class Jiro:
                         response = "Describe the plugin. Example: 'generate plugin weather checker'"
                 elif lower == "insights":
                     response = self.trainer.get_insights()
+                elif any(w in lower for w in ["remember", "recall", "what did i say",
+                                               "what did we talk", "past conversation"]):
+                    search_term = lower.replace("remember", "").replace("recall", "").strip()
+                    if search_term:
+                        results = self.long_memory.search_conversations(search_term, 5)
+                    else:
+                        results = self.long_memory.get_conversations(10)
+                    if results:
+                        parts = ["Here's what I remember:\n"]
+                        for r in results:
+                            role = "You" if r["role"] == "user" else "Me"
+                            content = r["content"][:100]
+                            parts.append(f"  {role}: {content}")
+                        response = "\n".join(parts)
+                    else:
+                        response = "I don't have any past conversations to recall yet."
+                elif lower in ("what can you do", "help", "commands"):
+                    response = (
+                        "Here's what I can do, boss:\n\n"
+                        "  Voice: Say 'Jiro' to wake me up, then speak your command\n"
+                        "  Open URLs: 'open google.com'\n"
+                        "  Open apps: 'open notepad'\n"
+                        "  Plugins: calculator, timer, notes, weather, flashcards, and 60+ more\n"
+                        "  Study: 'quiz me', flashcards, GPA calculator, study planner\n"
+                        "  PDF: 'analyze pdf' or 'read pdf <path>'\n"
+                        "  Memory: 'remember <topic>' to search past conversations\n"
+                        "  Schedule: 'my schedule', 'add event'\n"
+                        "  Alarms: 'set alarm for 5pm'\n"
+                        "  Updates: 'update yourself'\n"
+                        "  Self-fix: 'fix yourself'\n"
+                        "  Health: 'health check'\n"
+                        "  Mood: 'I feel happy/sad'\n"
+                        "  And much more! Just ask."
+                    )
                 else:
                     response = await self.brain.process(text)
 
         except Exception as e:
             logger.error("Processing error: %s", e)
+            # Log the failure for self-improvement
+            self.brain.log_failed_task(text, str(e))
+            self.long_memory.add_pattern("failed_task", {"task": text, "error": str(e)})
+
             fix = await self.self_fixer.diagnose_and_fix(e, context=f"processing: {text}")
             if fix.get("fixed"):
                 try:
@@ -346,8 +434,9 @@ class Jiro:
             self.gui.display("Jiro", response)
             self.gui.set_status("Online", "#00ff88")
 
+        # Speak in background - don't block the response
         try:
-            asyncio.create_task(self.tts.speak(response))
+            asyncio.ensure_future(self.tts.speak(response))
         except Exception:
             pass
         return response
@@ -366,13 +455,18 @@ class Jiro:
         logger.info("Wake word detected!")
         if self.gui:
             self.gui.set_status("Active", "#00ff88")
-        await self._speak("Yes boss? I'm listening.")
+        await self._speak("Yes boss?")
 
-        async def on_speech(text):
+        # Listen for ONE command, process it, then go back to wake word listening
+        text = await self.stt.listen_once(duration=10.0)
+        if text:
+            logger.info("Command after wake: %s", text)
             await self.process(text)
-            self.wake_word.deactivate()
+        else:
+            await self._speak("I didn't catch that, boss. Say my name again when you need me.")
 
-        await self.stt.listen_continuous(on_speech)
+        if self.gui:
+            self.gui.set_status("Listening for wake word...", "#4488ff")
 
     async def run_gui(self) -> None:
         """Run with full GUI."""

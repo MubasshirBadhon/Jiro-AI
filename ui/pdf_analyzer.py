@@ -78,4 +78,45 @@ class PDFAnalyzer:
             m = re.search(p, text, re.IGNORECASE)
             if m:
                 return m.group(1)
+
+        # Try to find recently opened PDFs on the system
+        recent = self._find_recent_pdfs()
+        if recent:
+            return str(recent[0])
+
         return None
+
+    def _find_recent_pdfs(self) -> list[Path]:
+        """Find recently modified PDF files in common locations."""
+        import platform
+        search_dirs = []
+        home = Path.home()
+
+        if platform.system() == "Windows":
+            search_dirs = [
+                home / "Desktop", home / "Downloads",
+                home / "Documents", home / "OneDrive" / "Desktop",
+            ]
+        else:
+            search_dirs = [home / "Desktop", home / "Downloads", home / "Documents"]
+
+        pdfs = []
+        for d in search_dirs:
+            if d.exists():
+                try:
+                    pdfs.extend(d.glob("*.pdf"))
+                except PermissionError:
+                    continue
+
+        # Sort by modification time (newest first)
+        pdfs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return pdfs[:5]
+
+    async def analyze_recent(self, query: Optional[str] = None) -> str:
+        """Analyze the most recently opened/downloaded PDF."""
+        pdfs = self._find_recent_pdfs()
+        if not pdfs:
+            return "No PDF files found on your Desktop or Downloads. Provide a path: 'analyze pdf C:\\path\\to\\file.pdf'"
+
+        latest = pdfs[0]
+        return await self.analyze(str(latest), query or f"Summarize this PDF: {latest.name}")
