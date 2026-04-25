@@ -1,99 +1,140 @@
 @echo off
-title Jiro AI - Setup & Launcher
+title JIRO AI - Complete Setup
 color 0B
 echo.
-echo  ========================================
-echo        JIRO AI - Setup ^& Launcher
-echo  ========================================
+echo  ================================================
+echo         JIRO AI - ONE CLICK COMPLETE SETUP
+echo  ================================================
 echo.
 
-:: Check Python
+:: ---- Step 1: Check Python ----
+echo [1/10] Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python is not installed or not in PATH.
-    echo Please install Python 3.10+ from https://python.org
+    echo [ERROR] Python not found! Install Python 3.10+ from:
+    echo         https://python.org/downloads
+    echo         IMPORTANT: Check "Add Python to PATH" during install!
     pause
     exit /b 1
 )
-
-echo [1/6] Checking Python version...
 for /f "tokens=2" %%i in ('python --version 2^>^&1') do set PYVER=%%i
 echo        Python %PYVER% found.
 
-:: Check if venv exists
+:: ---- Step 2: Create virtual environment ----
+echo [2/10] Setting up virtual environment...
 if not exist "venv" (
-    echo [2/6] Creating virtual environment...
     python -m venv venv
     if errorlevel 1 (
-        echo [ERROR] Failed to create virtual environment.
+        echo [ERROR] Failed to create venv. Try: python -m pip install virtualenv
         pause
         exit /b 1
     )
+    echo        Virtual environment created.
 ) else (
-    echo [2/6] Virtual environment already exists.
+    echo        Virtual environment exists.
 )
 
-:: Activate venv
-echo [3/6] Activating virtual environment...
+:: ---- Step 3: Activate venv ----
+echo [3/10] Activating virtual environment...
 call venv\Scripts\activate.bat
 
-:: Install dependencies
-echo [4/6] Installing dependencies...
-pip install --upgrade pip >nul 2>&1
-pip install -r requirements.txt
-if errorlevel 1 (
-    echo [WARNING] Some dependencies failed to install.
-    echo          Audio features may require additional system packages.
-    echo          Install PortAudio: https://www.portaudio.com/
-)
+:: ---- Step 4: Upgrade pip ----
+echo [4/10] Upgrading pip...
+python -m pip install --upgrade pip --quiet 2>nul
 
-:: Install ffmpeg if not present
+:: ---- Step 5: Install dependencies ----
+echo [5/10] Installing dependencies (this may take a few minutes)...
+pip install -r requirements.txt 2>nul
+if errorlevel 1 (
+    echo [WARNING] Some packages failed. Trying individually...
+    pip install httpx numpy edge-tts psutil schedule 2>nul
+    pip install customtkinter Pillow 2>nul
+    pip install sounddevice SpeechRecognition 2>nul
+    pip install mss PyMuPDF 2>nul
+    pip install groq 2>nul
+)
+echo        Dependencies installed.
+
+:: ---- Step 6: Check ffmpeg ----
+echo [6/10] Checking ffmpeg...
 ffmpeg -version >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] ffmpeg not found. TTS audio playback may be limited.
-    echo        Install ffmpeg: https://ffmpeg.org/download.html
-    echo        Or: winget install ffmpeg
+    echo        ffmpeg not found. Installing via winget...
+    winget install ffmpeg --accept-package-agreements --accept-source-agreements >nul 2>&1
+    if errorlevel 1 (
+        echo        [INFO] Could not auto-install ffmpeg.
+        echo        Download manually: https://ffmpeg.org/download.html
+        echo        Or run: winget install ffmpeg
+    ) else (
+        echo        ffmpeg installed!
+    )
+) else (
+    echo        ffmpeg found.
 )
 
-:: Create data directories
-echo [5/6] Setting up data directories...
+:: ---- Step 7: Create directories ----
+echo [7/10] Creating data directories...
 if not exist "data\memory" mkdir data\memory
 if not exist "data\recordings\screenshots" mkdir data\recordings\screenshots
 if not exist "data\models" mkdir data\models
+if not exist "data\logs" mkdir data\logs
+echo        Directories ready.
 
-:: Setup autostart
-echo [6/6] Setting up autostart...
-set SCRIPT_PATH=%~dp0
-set STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+:: ---- Step 8: Run first-time setup ----
+echo [8/10] Running first-time setup...
+echo.
+python main.py --setup
+echo.
 
-:: Create autostart VBS script (runs hidden in background)
-echo Set WshShell = CreateObject("WScript.Shell") > "%STARTUP_DIR%\JiroAI.vbs"
-echo WshShell.Run chr(34) ^& "%SCRIPT_PATH%start_jiro.bat" ^& chr(34), 0 >> "%STARTUP_DIR%\JiroAI.vbs"
-echo Set WshShell = Nothing >> "%STARTUP_DIR%\JiroAI.vbs"
+:: ---- Step 9: Setup auto-start ----
+echo [9/10] Setting up auto-start...
+set "SCRIPT_PATH=%~dp0"
+set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 
-:: Create the actual start script
-echo @echo off > start_jiro.bat
-echo cd /d "%SCRIPT_PATH%" >> start_jiro.bat
-echo call venv\Scripts\activate.bat >> start_jiro.bat
-echo python main.py >> start_jiro.bat
+:: Create start script
+(
+    echo @echo off
+    echo cd /d "%SCRIPT_PATH%"
+    echo call venv\Scripts\activate.bat
+    echo python main.py
+) > start_jiro.bat
+
+:: Create silent VBS launcher for auto-start
+(
+    echo Set WshShell = CreateObject^("WScript.Shell"^)
+    echo WshShell.Run chr^(34^) ^& "%SCRIPT_PATH%start_jiro.bat" ^& chr^(34^), 0
+    echo Set WshShell = Nothing
+) > "%STARTUP%\JiroAI.vbs"
+
+echo        Auto-start configured!
+echo        Jiro will run on Windows login.
+
+:: ---- Step 10: Run health check ----
+echo [10/10] Running health check...
+python main.py --health
 
 echo.
-echo  ========================================
-echo       SETUP COMPLETE!
-echo  ========================================
+echo  ================================================
+echo        SETUP COMPLETE!
+echo  ================================================
 echo.
-echo  Jiro AI has been set up successfully!
+echo  To start Jiro AI:
+echo    - Double-click start_jiro.bat
+echo    - Or run: python main.py
+echo    - Or say "Hey Jiro" (it auto-starts on login!)
 echo.
-echo  - Auto-start: ENABLED (runs on Windows login)
-echo  - To start now: run 'start_jiro.bat'
-echo  - To disable auto-start: delete JiroAI.vbs from
-echo    %STARTUP_DIR%
+echo  Modes:
+echo    python main.py             Full GUI mode
+echo    python main.py --cli       Text-only mode
+echo    python main.py --health    Health check
+echo    python main.py --dashboard Activity stats
+echo.
+echo  To disable auto-start:
+echo    Delete: %STARTUP%\JiroAI.vbs
 echo.
 echo  Starting Jiro AI now...
 echo.
 
-:: Start Jiro AI
-call venv\Scripts\activate.bat
 python main.py
 
 pause

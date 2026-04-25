@@ -1,35 +1,38 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.egg-info/
 dist/
 build/
 *.egg
+
+# Virtual environment
 venv/
 .venv/
+env/
 
-# Data (user-specific, keep gitkeep files)
-data/memory/*
-data/recordings/*
-data/models/*
-data/jiro.log
-!data/**/.gitkeep
-
-# Config (contains API keys)
-# config.json is tracked as a template with empty values
+# Data (runtime, not code)
+data/memory/
+data/recordings/
+data/models/
+data/logs/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Generated
 start_jiro.bat
-*.vbs
+*.bak
+*.pyc
+
+# Secrets (never commit real keys)
+# config.json is committed as a TEMPLATE with empty keys
+# Real keys should be entered via --setup

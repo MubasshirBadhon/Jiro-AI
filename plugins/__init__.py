@@ -1,1 +1,1 @@
-"""Jiro AI - Plugins package. All plugins are dynamically loaded at runtime."""
+"""Jiro AI - Plugin system. Plugins are auto-loaded from this directory."""

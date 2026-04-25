@@ -1,1 +1,1 @@
-"""Jiro AI - Core modules."""
+"""Jiro AI - Core system modules."""
