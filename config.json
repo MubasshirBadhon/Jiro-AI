@@ -1,0 +1,92 @@
+{
+    "assistant_name": "Jiro",
+    "wake_word": "jiro",
+    "language": "en",
+    "supported_languages": ["en", "bn"],
+
+    "supabase": {
+        "backend_url": "",
+        "anon_key": ""
+    },
+
+    "api_keys": {
+        "nvidia": "",
+        "huggingface": "",
+        "groq": "",
+        "gemini": "",
+        "openrouter": ""
+    },
+
+    "models": {
+        "nvidia_understanding": "meta/llama-3.1-70b-instruct",
+        "groq_generation": "llama-3.1-70b-versatile",
+        "gemini_generation": "gemini-2.0-flash",
+        "huggingface_heavy": "stabilityai/stable-diffusion-xl-base-1.0",
+        "openrouter_fallback": "meta-llama/llama-3.1-70b-instruct",
+        "offline_model": "tinyllama"
+    },
+
+    "tts": {
+        "engine": "edge-tts",
+        "voice": "en-US-GuyNeural",
+        "rate": "+0%",
+        "volume": "+0%"
+    },
+
+    "stt": {
+        "provider": "groq",
+        "model": "whisper-large-v3",
+        "silence_threshold": 2.0,
+        "energy_threshold": 300
+    },
+
+    "gui": {
+        "always_on_top": true,
+        "opacity": 0.95,
+        "width": 400,
+        "height": 600,
+        "position": "top-right",
+        "minimized_width": 60,
+        "minimized_height": 60
+    },
+
+    "monitoring": {
+        "enabled": true,
+        "screenshot_interval_seconds": 30,
+        "active_window_tracking": true,
+        "productivity_alerts": true,
+        "auto_close_distractions": false,
+        "distraction_sites": ["facebook.com", "instagram.com", "tiktok.com"],
+        "distraction_threshold_minutes": 15
+    },
+
+    "memory": {
+        "max_conversation_history": 100,
+        "persist_to_disk": true,
+        "memory_file": "data/memory/jiro_memory.json"
+    },
+
+    "proactive": {
+        "enabled": true,
+        "study_quiz_interval_minutes": 30,
+        "idle_chat_interval_minutes": 10,
+        "schedule_reminders": true
+    },
+
+    "security": {
+        "require_passkey": false,
+        "passkey_hash": ""
+    },
+
+    "offline": {
+        "enabled": false,
+        "model_path": "data/models/",
+        "auto_download": true
+    },
+
+    "autostart": {
+        "enabled": true,
+        "start_minimized": true,
+        "background_mode": true
+    }
+}

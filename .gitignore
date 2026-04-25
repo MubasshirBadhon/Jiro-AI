@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+
+# Data (user-specific, keep gitkeep files)
+data/memory/*
+data/recordings/*
+data/models/*
+data/jiro.log
+!data/**/.gitkeep
+
+# Config (contains API keys)
+# config.json is tracked as a template with empty values
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated
+start_jiro.bat
+*.vbs
