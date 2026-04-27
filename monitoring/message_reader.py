@@ -1,7 +1,7 @@
 """Message Reader - Reads messages and extracts tasks/reminders.
 
 Analyzes text from screen or clipboard to extract actionable items
-like calls, meetings, reminders, and tasks. Supports Bengali + English.
+like calls, meetings, reminders, and tasks. English only.
 """
 
 import logging
@@ -41,20 +41,30 @@ class MessageReader:
         reminders = []
         text_lower = text.lower()
 
+        # Call time extraction patterns (English)
         call_patterns = [
-            r'call\s+(?:me\s+)?(?:at\s+)?(\d{1,2})\s*(?::\d{2})?\s*(am|pm|AM|PM)?',
-            r'call\s+dio\s+(\d{1,2})\s*(?:tay|ta|টায়)',
-            r'call\s+dibo\s+(\d{1,2})\s*(?:tay|ta)',
-            r'(\d{1,2})\s*(?:tay|ta|টায়)\s*call\s*(?:dio|dibo|korbo)',
+            r'call\s+(?:me\s+)?(?:at\s+)?(\d{1,2})\s*(?::(\d{2}))?\s*(am|pm|AM|PM)',
+            r'call\s+(?:me\s+)?(?:at\s+)?(\d{1,2})\s*(?::(\d{2}))?(?:\s*o.?clock)?',
         ]
         for pattern in call_patterns:
-            match = re.search(pattern, text_lower)
+            match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 hour = int(match.group(1))
+                minute = int(match.group(2) or 0)
+                period = match.group(3) if len(match.groups()) >= 3 else None
+                if period:
+                    period = period.lower()
+                    if period == "pm" and hour != 12:
+                        hour += 12
+                    elif period == "am" and hour == 12:
+                        hour = 0
+                elif hour <= 12:
+                    now = datetime.now()
+                    if now.hour >= hour:
+                        hour += 12
+
                 now = datetime.now()
-                if hour <= 12 and now.hour >= hour:
-                    hour += 12
-                target = now.replace(hour=hour % 24, minute=0, second=0)
+                target = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
                 if target <= now:
                     target += timedelta(days=1)
                 reminders.append({
@@ -63,30 +73,31 @@ class MessageReader:
                     "message": text,
                     "source": "message",
                 })
+                break
 
-        bangla_time_map = {
-            "bikal": 16, "bikale": 16, "bikalei": 16,
-            "shokal": 8, "sokal": 8,
-            "raat": 21, "raate": 21,
-            "dupur": 12, "dupure": 12,
+        # Time period patterns
+        time_periods = {
+            "morning": 8, "afternoon": 14, "evening": 18, "night": 21,
+            "tonight": 21, "noon": 12,
         }
-
-        for word, hour in bangla_time_map.items():
+        for word, hour in time_periods.items():
             if word in text_lower:
-                if any(a in text_lower for a in ["call", "remind", "janabo", "dibo"]):
+                if any(a in text_lower for a in ["call", "remind", "meet", "tell"]):
                     now = datetime.now()
-                    target = now.replace(hour=hour, minute=0, second=0)
+                    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
                     if target <= now:
                         target += timedelta(days=1)
                     reminders.append({
                         "type": "reminder",
                         "time": target.isoformat(),
                         "message": text,
-                        "source": "bangla_message",
+                        "source": "message",
                     })
                 break
 
-        if any(w in text_lower for w in ["free acho", "free aso", "busy"]):
+        # Schedule check
+        if any(w in text_lower for w in ["are you free", "are you busy",
+                                           "available", "have time"]):
             actions.append({
                 "type": "check_schedule",
                 "message": text,

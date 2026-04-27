@@ -1,10 +1,16 @@
-"""Auto Updater - Pull latest code from GitHub automatically.
+"""Auto Updater - Pull latest code from GitHub on every startup.
 
-Checks the Jiro AI GitHub repo for updates and applies them.
-Can run on startup or be triggered manually.
+Runs automatically when Jiro starts:
+1. Check for updates from GitHub
+2. If updates available: git pull + pip install
+3. Restart Jiro with new code
+
+Also handles auto-start registration on Windows.
 """
 
 import logging
+import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +23,7 @@ REPO_URL = "https://github.com/MubasshirBadhon/Jiro-AI.git"
 
 
 class AutoUpdater:
-    """Handles automatic updates from GitHub."""
+    """Auto-update from GitHub on every startup."""
 
     def __init__(self, config: dict):
         self._config = config
@@ -26,7 +32,7 @@ class AutoUpdater:
         self._branch = config.get("update", {}).get("branch", "main")
 
     def check_for_updates(self) -> dict:
-        """Check if there are new updates available."""
+        """Check if there are new commits on the remote."""
         try:
             result = subprocess.run(
                 ["git", "fetch", "origin", self._branch],
@@ -53,7 +59,7 @@ class AutoUpdater:
             return {"available": False, "error": str(e)}
 
     def update(self) -> dict:
-        """Pull latest changes from GitHub."""
+        """Pull latest changes and install dependencies."""
         try:
             is_git = subprocess.run(
                 ["git", "rev-parse", "--is-inside-work-tree"],
@@ -62,16 +68,19 @@ class AutoUpdater:
             if is_git.returncode != 0:
                 return self._clone_fresh()
 
+            # Stash local changes
             stash = subprocess.run(
                 ["git", "stash"],
                 cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=10,
             )
 
+            # Pull latest
             pull = subprocess.run(
                 ["git", "pull", "origin", self._branch, "--rebase"],
                 cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=60,
             )
 
+            # Restore stashed changes
             if stash.stdout and "No local changes" not in stash.stdout:
                 subprocess.run(
                     ["git", "stash", "pop"],
@@ -80,17 +89,18 @@ class AutoUpdater:
 
             if pull.returncode == 0:
                 self._install_deps()
-                logger.info("Jiro AI updated successfully!")
-                return {"success": True, "message": "Updated to latest version!"}
+                return {"success": True, "updated": True,
+                        "message": "Updated to latest version!"}
             else:
-                return {"success": False, "message": f"Update failed: {pull.stderr[:200]}"}
+                return {"success": False, "updated": False,
+                        "message": f"Update failed: {pull.stderr[:200]}"}
 
         except FileNotFoundError:
-            return {"success": False, "message": "git not installed"}
+            return {"success": False, "updated": False, "message": "git not installed"}
         except subprocess.TimeoutExpired:
-            return {"success": False, "message": "Update timed out"}
+            return {"success": False, "updated": False, "message": "Update timed out"}
         except Exception as e:
-            return {"success": False, "message": str(e)}
+            return {"success": False, "updated": False, "message": str(e)}
 
     def _clone_fresh(self) -> dict:
         """Clone the repo fresh if not a git directory."""
@@ -117,18 +127,17 @@ class AutoUpdater:
             )
 
             if result.returncode == 0:
-                import shutil
                 temp = PROJECT_ROOT / "_update_temp"
-                for item in temp.iterdir():
-                    if item.name == ".git":
+                for f in temp.iterdir():
+                    if f.name == ".git":
                         continue
-                    dest = PROJECT_ROOT / item.name
-                    if item.is_dir():
+                    dest = PROJECT_ROOT / f.name
+                    if f.is_dir():
                         if dest.exists():
                             shutil.rmtree(dest)
-                        shutil.copytree(item, dest)
+                        shutil.copytree(f, dest)
                     else:
-                        shutil.copy2(item, dest)
+                        shutil.copy2(f, dest)
                 shutil.rmtree(temp)
 
                 for item in important:
@@ -141,11 +150,13 @@ class AutoUpdater:
                             shutil.copy2(src, dst)
 
                 self._install_deps()
-                return {"success": True, "message": "Fresh install from GitHub complete!"}
+                return {"success": True, "updated": True,
+                        "message": "Fresh install from GitHub complete!"}
 
-            return {"success": False, "message": f"Clone failed: {result.stderr[:200]}"}
+            return {"success": False, "updated": False,
+                    "message": f"Clone failed: {result.stderr[:200]}"}
         except Exception as e:
-            return {"success": False, "message": str(e)}
+            return {"success": False, "updated": False, "message": str(e)}
 
     def _install_deps(self) -> None:
         """Install/update dependencies after update."""
@@ -160,17 +171,52 @@ class AutoUpdater:
             except Exception as e:
                 logger.warning("Dependency update failed: %s", e)
 
-    def auto_update_on_start(self) -> Optional[str]:
-        """Run auto-update on startup if enabled."""
+    def auto_update_on_startup(self) -> dict:
+        """Run auto-update on every startup. Returns update result."""
         if not self._auto_update:
-            return None
+            return {"updated": False, "message": "Auto-update disabled"}
 
+        logger.info("Checking for updates from %s...", self._repo_url)
         check = self.check_for_updates()
+
         if check.get("available"):
-            logger.info("Updates available (%d commits). Updating...", check.get("commits", 0))
+            count = check.get("commits", 0)
+            logger.info("Updates available (%d commits). Updating...", count)
             result = self.update()
-            if result["success"]:
-                return f"Jiro updated! ({check.get('commits', 0)} new changes)"
+            if result.get("updated"):
+                logger.info("Updated successfully! %d new changes applied.", count)
+                return {"updated": True,
+                        "message": f"Updated! {count} new changes applied."}
             else:
-                logger.warning("Auto-update failed: %s", result["message"])
-        return None
+                logger.warning("Auto-update failed: %s", result.get("message"))
+                return {"updated": False, "message": result.get("message", "")}
+        else:
+            logger.info("Jiro is up to date.")
+            return {"updated": False, "message": "Already up to date"}
+
+    def restart_jiro(self) -> None:
+        """Restart Jiro after an update."""
+        logger.info("Restarting Jiro AI with updated code...")
+        os.execl(sys.executable, sys.executable, *sys.argv)
+
+    def register_autostart(self) -> str:
+        """Register Jiro to auto-start when Windows boots."""
+        if platform.system() != "Windows":
+            return "Auto-start registration is only available on Windows."
+
+        try:
+            startup_folder = Path(os.environ.get("APPDATA", "")) / \
+                "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+            if not startup_folder.exists():
+                return f"Startup folder not found: {startup_folder}"
+
+            bat_content = f'''@echo off
+cd /d "{PROJECT_ROOT}"
+start /min pythonw main.py
+'''
+            bat_path = startup_folder / "JiroAI.bat"
+            bat_path.write_text(bat_content)
+            return f"Auto-start registered: {bat_path}"
+        except Exception as e:
+            return f"Failed to register auto-start: {e}"

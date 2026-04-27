@@ -1,10 +1,9 @@
-"""Smart Alarm Manager - Bengali + English natural language alarms.
+"""Smart Alarm Manager - English natural language alarms.
 
-Understands time references in both languages:
+Understands time references:
   "set alarm for 5 PM"
-  "5 tay call dio"  → smart AM/PM decision
-  "bikal 4 tay"     → 4 PM
-  "ami call diye janabo bikale" → afternoon reminder
+  "remind me in 30 minutes"
+  "wake me up at 7 AM"
 """
 
 import asyncio
@@ -21,7 +20,7 @@ ALARMS_FILE = Path(__file__).parent.parent / "data" / "memory" / "alarms.json"
 
 
 class AlarmManager:
-    """Smart alarm system with Bengali + English NLP."""
+    """Smart alarm system with English NLP."""
 
     def __init__(self, config: dict):
         self._config = config

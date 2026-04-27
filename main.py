@@ -1,8 +1,9 @@
 """
-JIRO AI - Your Personal AI Assistant
-=====================================
+JIRO AI - Your Personal AI Assistant (LOCAL-FIRST)
+====================================================
 
 Entry point that boots and orchestrates all Jiro AI components.
+Auto-updates from GitHub on every startup.
 
 Usage:
     python main.py              # Full mode with GUI + voice + monitoring
@@ -13,6 +14,7 @@ Usage:
     python main.py --set-passkey # Set/change passkey
     python main.py --update     # Check for updates from GitHub
     python main.py --fix        # Run self-fixer diagnostics
+    python main.py --report     # Show self-report of issues
 """
 
 import argparse
@@ -32,6 +34,7 @@ from core.health_checker import HealthChecker
 from core.self_fixer import SelfFixer
 from core.offline_model_manager import OfflineModelManager
 from core.auto_updater import AutoUpdater
+from core.self_reporter import SelfReporter
 from voice.stt import SpeechToText, WakeWordDetector
 from voice.tts import TextToSpeech
 from ai.brain import Brain
@@ -54,7 +57,8 @@ from ui.overlay import JiroOverlay
 from ui.pdf_analyzer import PDFAnalyzer
 from ui.dashboard import Dashboard
 
-for d in ["data/memory", "data/recordings/screenshots", "data/models", "data/logs"]:
+for d in ["data/memory", "data/recordings/screenshots", "data/models",
+          "data/logs", "data/reports"]:
     (PROJECT_ROOT / d).mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -78,7 +82,7 @@ def load_config() -> dict:
 
 
 class Jiro:
-    """Main Jiro AI orchestrator."""
+    """Main Jiro AI orchestrator - LOCAL-FIRST architecture."""
 
     def __init__(self):
         logger.info("=" * 40)
@@ -93,12 +97,13 @@ class Jiro:
         self.passkey = PasskeyManager(self.config)
         self.offline_mgr = OfflineModelManager(self.config)
         self.updater = AutoUpdater(self.config)
+        self.reporter = SelfReporter(self.config)
 
         # AI
         self.brain = Brain(self.config, self.api_keys)
         self.self_fixer = SelfFixer(self.config, self.brain)
 
-        # Voice
+        # Voice (local-first: pyttsx3 for TTS, Google free for STT)
         self.stt = SpeechToText(self.config, self.api_keys)
         self.tts = TextToSpeech(self.config)
         self.wake_word = WakeWordDetector(self.config, self.stt)
@@ -134,11 +139,19 @@ class Jiro:
         self._shutdown = asyncio.Event()
 
     async def initialize(self) -> None:
-        """Initialize all components with self-fixing."""
-        # Auto-update check
-        update_msg = self.updater.auto_update_on_start()
-        if update_msg:
-            logger.info(update_msg)
+        """Initialize all components. Auto-update runs FIRST."""
+        # Auto-update from GitHub on every startup
+        try:
+            result = self.updater.auto_update_on_startup()
+            if result.get("updated"):
+                logger.info("Updated from GitHub! Restarting...")
+                self.updater.restart_jiro()
+                return
+            else:
+                logger.info("Update check: %s", result.get("message", ""))
+        except Exception as e:
+            logger.warning("Auto-update check failed: %s", e)
+            self.reporter.log_error("auto_updater", str(e))
 
         # Run self-fixer startup checks
         fixes = await self.self_fixer.startup_check()
@@ -160,7 +173,7 @@ class Jiro:
         # Load plugins with error recovery
         self.plugins.load_all()
         plugin_list = self.plugins.list_plugins()
-        logger.info("Loaded %d plugins: %s", len(plugin_list), [p["name"] for p in plugin_list])
+        logger.info("Loaded %d plugins", len(plugin_list))
 
         # Check for missing API keys in plugins
         self.api_prompter.check_all_plugins(plugin_list)
@@ -169,7 +182,7 @@ class Jiro:
         self.screen.on_activity_change(self._on_activity)
         self.alarms.on_alarm(self._on_alarm)
 
-        # Restore conversation history from long-term memory across sessions
+        # Restore conversation history from long-term memory
         history = self.long_memory.get_conversations(30)
         if history:
             self.brain.conversation_history = [
@@ -177,16 +190,15 @@ class Jiro:
             ]
             logger.info("Restored %d messages from memory", len(history))
 
-        # Load learned patterns for context
+        # Load learned patterns
         failed_tasks = self.long_memory.get_patterns("failed_task", 10)
         for ft in failed_tasks:
             self.brain.log_failed_task(ft["data"].get("task", ""), ft["data"].get("error", ""))
 
-        logger.info("Jiro AI initialized! (%d providers, %d plugins, %d memories)",
+        logger.info("Jiro AI ready! (%d providers, %d plugins, %d memories)",
                      len(providers), len(plugin_list), len(history))
 
     async def _on_activity(self, activity: dict) -> None:
-        """Handle activity changes from screen monitor."""
         self.activity.record(activity)
         self.trainer.learn_from_activity(activity)
 
@@ -222,6 +234,7 @@ class Jiro:
             await self.tts.speak(text)
         except Exception as e:
             logger.warning("TTS error: %s", e)
+            self.reporter.log_error("tts", str(e))
 
     async def process(self, text: str) -> str:
         """Process user input through the full pipeline."""
@@ -232,14 +245,14 @@ class Jiro:
             self.gui.set_status("Thinking...", "#ffaa00")
 
         try:
-            # Identity commands
             lower = text.lower().strip()
 
-            if lower in ("who are you", "what is your name", "what's your name", "tumi ke"):
+            # Identity
+            if lower in ("who are you", "what is your name", "what's your name"):
                 response = ("I'm Jiro AI, pronounced like 'Zero'. I'm your personal AI assistant, "
                             "like JARVIS but for your daily life. How can I help you, boss?")
 
-            # Open URL / website commands
+            # Open URL / website
             elif lower.startswith(("open ", "go to ", "visit ", "browse ")) and (
                 "http" in lower or ".com" in lower or ".org" in lower or
                 ".net" in lower or ".io" in lower or "www." in lower
@@ -257,7 +270,7 @@ class Jiro:
                     except Exception as e:
                         response = f"Could not open browser: {e}"
                 else:
-                    response = "I couldn't find a URL in your command. Try: 'open https://google.com'"
+                    response = "I couldn't find a URL in your command."
 
             # Open apps
             elif lower.startswith(("open ", "launch ", "start ")) and "http" not in lower:
@@ -281,6 +294,31 @@ class Jiro:
                 else:
                     response = await self.brain.process(text)
 
+            # File creation commands
+            elif any(lower.startswith(p) for p in [
+                "create doc", "create document", "make doc", "write doc",
+                "create pdf", "make pdf", "generate pdf",
+                "create ppt", "create presentation", "make ppt",
+                "create folder", "make folder", "new folder", "mkdir",
+            ]):
+                plugin = self.plugins.find_match(text)
+                if plugin:
+                    response = await plugin.execute(text)
+                else:
+                    # Direct handling if plugin not loaded
+                    response = await self._handle_file_creation(text)
+
+            # CLI command execution
+            elif any(lower.startswith(p) for p in [
+                "run command", "execute", "run cmd", "powershell",
+                "cmd ", "terminal", "shell", "run shell", "system command",
+            ]):
+                plugin = self.plugins.find_match(text)
+                if plugin:
+                    response = await plugin.execute(text)
+                else:
+                    response = await self._handle_command(text)
+
             # Update command
             elif lower in ("update", "update yourself", "check for updates"):
                 check = self.updater.check_for_updates()
@@ -289,6 +327,10 @@ class Jiro:
                     response = result["message"]
                 else:
                     response = "I'm already up to date!"
+
+            # Self-report
+            elif lower in ("report", "show report", "status report", "self report"):
+                response = self.reporter.generate_report()
 
             # Download offline model
             elif lower in ("download model", "offline model", "download offline"):
@@ -302,13 +344,13 @@ class Jiro:
                         if dl:
                             response = "Offline model downloaded! I can now work without internet."
                         else:
-                            response = "Model download failed. Check your internet connection and try again."
+                            response = "Model download failed. Check your internet and try again."
                     else:
                         response = f"Could not set up offline mode: {result.get('action', 'Unknown error')}"
                 except Exception as e:
                     response = f"Offline model setup failed: {e}"
 
-            # Self-fix command
+            # Self-fix
             elif lower in ("fix yourself", "self fix", "diagnose"):
                 fixes = await self.self_fixer.fix_all_issues()
                 fixed = [f for f in fixes if f.get("fixed")]
@@ -324,7 +366,12 @@ class Jiro:
                     parts.append("Everything looks good! No issues found.")
                 response = " ".join(parts)
 
-            # Check for reminder extraction
+            # Auto-start registration
+            elif lower in ("register autostart", "auto start", "startup"):
+                msg = self.updater.register_autostart()
+                response = msg
+
+            # Reminder extraction
             elif self.reminders.should_extract(text):
                 extracted = self.reminders.extract_and_set(text)
                 if extracted:
@@ -346,6 +393,7 @@ class Jiro:
                     try:
                         response = await plugin.execute(text)
                     except Exception as e:
+                        self.reporter.log_failure(f"plugin:{plugin.name}", str(e))
                         fix = await self.self_fixer.fix_plugin(
                             Path(f"plugins/{type(plugin).__module__.split('.')[-1]}.py"), e
                         )
@@ -366,7 +414,6 @@ class Jiro:
                     if path:
                         response = await self.pdf.analyze(path, text)
                     else:
-                        # Try to find and analyze the most recent PDF
                         response = await self.pdf.analyze_recent(text)
                 elif lower in ("health", "health check", "status"):
                     report = await self.health.full_check()
@@ -412,29 +459,33 @@ class Jiro:
                     response = (
                         "Here's what I can do, boss:\n\n"
                         "  Voice: Say 'Jiro' to wake me up, then speak your command\n"
-                        "  Open URLs: 'open google.com' or 'open https://...'\n"
+                        "  Create files: 'create doc report', 'create pdf notes', 'create ppt slides'\n"
+                        "  Create folders: 'create folder MyProject'\n"
+                        "  Run commands: 'run command dir', 'powershell Get-Process'\n"
+                        "  Open URLs: 'open google.com'\n"
                         "  Open apps: 'open notepad', 'open chrome'\n"
-                        "  Screenshot: 'what's on my screen' or 'analyze screen'\n"
+                        "  Screenshot: 'what's on my screen' (uses local OCR first)\n"
                         "  PDF: 'analyze pdf' or 'read pdf <path>'\n"
                         "  Memory: 'remember <topic>' to search past conversations\n"
-                        "  Plugins: calculator, timer, notes, weather, flashcards, and 60+ more\n"
-                        "  Study: 'quiz me', flashcards, GPA calculator, study planner\n"
+                        "  Study: flashcards, quizzes, GPA calculator, study planner\n"
                         "  Schedule: 'my schedule', 'add event'\n"
                         "  Alarms: 'set alarm for 5pm'\n"
                         "  Offline: 'download model' for offline AI\n"
-                        "  Updates: 'update yourself'\n"
+                        "  Updates: 'update yourself' (also auto-updates on startup)\n"
+                        "  Auto-start: 'register autostart' to start with Windows\n"
                         "  Self-fix: 'fix yourself'\n"
+                        "  Reports: 'show report' for self-assessment\n"
                         "  Health: 'health check'\n"
-                        "  And much more! Just ask."
+                        "  And 69+ plugins! Type 'list plugins' to see all."
                     )
                 else:
                     response = await self.brain.process(text)
 
         except Exception as e:
             logger.error("Processing error: %s", e)
-            # Log the failure for self-improvement
             self.brain.log_failed_task(text, str(e))
             self.long_memory.add_pattern("failed_task", {"task": text, "error": str(e)})
+            self.reporter.log_failure(text, str(e))
 
             fix = await self.self_fixer.diagnose_and_fix(e, context=f"processing: {text}")
             if fix.get("fixed"):
@@ -453,12 +504,49 @@ class Jiro:
             self.gui.display("Jiro", response)
             self.gui.set_status("Online", "#00ff88")
 
-        # Speak in background - don't block the response
+        # Speak in background
         try:
             asyncio.ensure_future(self.tts.speak(response))
         except Exception:
             pass
         return response
+
+    async def _handle_file_creation(self, text: str) -> str:
+        """Handle file creation commands directly."""
+        lower = text.lower()
+        if "doc" in lower:
+            try:
+                from plugins.doc_creator_plugin import handle
+                return await handle(text)
+            except Exception as e:
+                return f"Doc creation failed: {e}"
+        elif "pdf" in lower:
+            try:
+                from plugins.pdf_creator_plugin import handle
+                return await handle(text)
+            except Exception as e:
+                return f"PDF creation failed: {e}"
+        elif "ppt" in lower or "presentation" in lower:
+            try:
+                from plugins.pptx_creator_plugin import handle
+                return await handle(text)
+            except Exception as e:
+                return f"PPT creation failed: {e}"
+        elif "folder" in lower or "mkdir" in lower:
+            try:
+                from plugins.folder_creator_plugin import handle
+                return await handle(text)
+            except Exception as e:
+                return f"Folder creation failed: {e}"
+        return "I can create: doc, pdf, ppt, or folders. Example: 'create doc report My content here'"
+
+    async def _handle_command(self, text: str) -> str:
+        """Handle CLI command execution directly."""
+        try:
+            from plugins.command_executor_plugin import handle
+            return await handle(text)
+        except Exception as e:
+            return f"Command execution failed: {e}"
 
     async def _on_text(self, text: str) -> None:
         await self.process(text)
@@ -476,7 +564,7 @@ class Jiro:
             self.gui.set_status("Active", "#00ff88")
         await self._speak("Yes boss?")
 
-        # Listen for ONE command, process it, then go back to wake word listening
+        # Listen for ONE command, process it, then return to wake word
         text = await self.stt.listen_once(duration=10.0)
         if text:
             logger.info("Command after wake: %s", text)
@@ -513,7 +601,6 @@ class Jiro:
         if self.permissions.is_granted("microphone"):
             tasks.append(asyncio.create_task(self.wake_word.start(self._on_wake)))
 
-        # Greet user
         asyncio.create_task(self._speak(
             "Jiro AI online. Ready to assist you, boss."
         ))
@@ -546,14 +633,15 @@ class Jiro:
 
         print("\n" + "=" * 50)
         print("  JIRO AI - CLI Mode (pronounced 'Zero')")
+        print("  LOCAL-FIRST: Offline LLM -> API fallback")
         print("=" * 50)
-        print("  I'm Jiro, your personal AI assistant.")
         providers = self.brain.get_available_providers()
-        print(f"  Active providers: {', '.join(providers) if providers else 'NONE - run --setup'}")
-        print(f"  Loaded plugins: {len(self.plugins.list_plugins())}")
+        print(f"  Providers: {', '.join(providers) if providers else 'NONE - run --setup'}")
+        print(f"  Plugins: {len(self.plugins.list_plugins())}")
         print()
-        print("  Commands: voice, health, dashboard, plugins,")
-        print("  insights, update, fix yourself, generate plugin <desc>, quit")
+        print("  New commands: create doc/pdf/ppt, create folder,")
+        print("  run command <cmd>, powershell <cmd>, show report,")
+        print("  register autostart, voice, quit")
         print("=" * 50 + "\n")
 
         while True:
@@ -567,7 +655,6 @@ class Jiro:
                 if not user_input.strip():
                     continue
 
-                # Voice input mode
                 if user_input.lower() == "voice":
                     print("Jiro: I'm listening... (speak now)")
                     text = await self.stt.listen_once(duration=8.0)
@@ -589,12 +676,10 @@ class Jiro:
         self.long_memory.close()
 
     async def run_health(self) -> None:
-        """Run health check."""
         report = await self.health.full_check()
         print(self.health.format_report(report))
 
     async def run_fix(self) -> None:
-        """Run self-fixer diagnostics."""
         print("\n--- Jiro AI Self-Fixer ---\n")
         fixes = await self.self_fixer.fix_all_issues()
         for fix in fixes:
@@ -603,7 +688,6 @@ class Jiro:
         print(f"\nTotal: {len(fixes)} items checked")
 
     async def run_update(self) -> None:
-        """Check for and apply updates."""
         print("\n--- Jiro AI Auto-Updater ---\n")
         check = self.updater.check_for_updates()
         if check.get("available"):
@@ -621,14 +705,18 @@ class Jiro:
         else:
             print("  Already up to date!")
 
+    async def run_report(self) -> None:
+        """Show self-assessment report."""
+        print(self.reporter.generate_report())
+
     async def run_setup(self) -> None:
         """Interactive first-time setup."""
         print("\n" + "=" * 50)
         print("  JIRO AI - First Time Setup")
         print("  (Your personal JARVIS-like assistant)")
+        print("  LOCAL-FIRST: Works offline, APIs enhance it")
         print("=" * 50)
 
-        # Startup fixes first
         print("\n--- Auto-fixing dependencies ---")
         fixes = await self.self_fixer.startup_check()
         for fix in fixes:
@@ -636,21 +724,18 @@ class Jiro:
                 status = "OK" if fix.get("fixed") else "WARN"
                 print(f"  [{status}] {fix['action']}")
 
-        # Permissions
         print("\n--- Permissions ---")
         self.permissions.check_all_permissions(use_gui=False)
 
-        # API Keys
-        print("\n--- API Keys ---")
+        print("\n--- API Keys (optional - Jiro works offline too) ---")
         print("  Get free API keys from:")
         print("    Groq (recommended): https://console.groq.com")
         print("    Gemini: https://aistudio.google.com")
-        print("    NVIDIA: https://build.nvidia.com")
         print("    HuggingFace: https://huggingface.co/settings/tokens")
         print("    OpenRouter: https://openrouter.ai/keys")
         print()
 
-        providers = ["groq", "gemini", "nvidia", "huggingface", "openrouter"]
+        providers = ["groq", "gemini", "huggingface", "openrouter"]
         for provider in providers:
             current = self.config.get("api_keys", {}).get(provider, "")
             if current:
@@ -661,8 +746,7 @@ class Jiro:
                     self.api_keys.set_key(provider, key)
                     print(f"  {provider}: saved!")
 
-        # Supabase
-        print("\n--- Supabase (optional - for remote config) ---")
+        print("\n--- Supabase (optional) ---")
         for field in ["backend_url", "anon_key"]:
             current = self.config.get("supabase", {}).get(field, "")
             if not current:
@@ -670,11 +754,9 @@ class Jiro:
                 if val:
                     self.config.setdefault("supabase", {})[field] = val
 
-        # Save config
         with open(PROJECT_ROOT / "config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4)
 
-        # Passkey
         print("\n--- Security ---")
         set_pass = input("  Set a passkey? (y/n): ").strip().lower()
         if set_pass == "y":
@@ -682,15 +764,12 @@ class Jiro:
             if passkey:
                 self.passkey.set_passkey(passkey)
 
-        # Integrity baseline
         self.integrity.save_baseline()
 
-        # Offline model
         print("\n--- Offline Model ---")
         print(f"  {self.offline_mgr.get_status()}")
         dl = input("  Download offline model? (y/n): ").strip().lower()
         if dl == "y":
-            # Try to install llama-cpp-python first
             result = await self.self_fixer.install_offline_llm()
             print(f"  {result['action']}")
             if result.get("fixed"):
@@ -699,7 +778,12 @@ class Jiro:
                 )
                 print("\n  Done!")
 
-        # Health check
+        print("\n--- Auto-Start ---")
+        autostart = input("  Register Jiro to start with Windows? (y/n): ").strip().lower()
+        if autostart == "y":
+            msg = self.updater.register_autostart()
+            print(f"  {msg}")
+
         print("\n--- Final Health Check ---")
         report = await self.health.full_check()
         print(self.health.format_report(report))
@@ -723,6 +807,7 @@ def main():
     parser.add_argument("--set-passkey", action="store_true", help="Set/change passkey")
     parser.add_argument("--update", action="store_true", help="Check for updates")
     parser.add_argument("--fix", action="store_true", help="Run self-fixer")
+    parser.add_argument("--report", action="store_true", help="Show self-report")
     args = parser.parse_args()
 
     jiro = Jiro()
@@ -742,6 +827,8 @@ def main():
         asyncio.run(jiro.run_update())
     elif args.fix:
         asyncio.run(jiro.run_fix())
+    elif args.report:
+        asyncio.run(jiro.run_report())
     elif args.dashboard:
         print(jiro.dashboard.format_dashboard())
     elif args.set_passkey:

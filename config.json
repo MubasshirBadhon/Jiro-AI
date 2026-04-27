@@ -2,7 +2,6 @@
     "assistant_name": "Jiro",
     "wake_word": "jiro",
     "language": "en",
-    "supported_languages": ["en", "bn"],
 
     "supabase": {
         "backend_url": "",
@@ -10,7 +9,6 @@
     },
 
     "api_keys": {
-        "nvidia": "",
         "huggingface": "",
         "groq": "",
         "gemini": "",
@@ -18,8 +16,8 @@
     },
 
     "models": {
-        "nvidia_understanding": "meta/llama-3.1-70b-instruct",
         "groq_generation": "llama-3.3-70b-versatile",
+        "groq_fallback": "llama-3.1-8b-instant",
         "gemini_generation": "gemini-2.0-flash",
         "huggingface_heavy": "stabilityai/stable-diffusion-xl-base-1.0",
         "openrouter_fallback": "meta-llama/llama-3.1-70b-instruct",
@@ -27,15 +25,13 @@
     },
 
     "tts": {
-        "engine": "edge-tts",
-        "voice": "en-US-GuyNeural",
-        "rate": "+15%",
-        "volume": "+0%"
+        "engine": "pyttsx3",
+        "rate_wpm": 180,
+        "volume_level": 0.9
     },
 
     "stt": {
-        "provider": "groq",
-        "model": "whisper-large-v3",
+        "provider": "local",
         "silence_threshold": 2.0,
         "energy_threshold": 300
     },
@@ -79,7 +75,7 @@
     },
 
     "offline": {
-        "enabled": false,
+        "enabled": true,
         "model_path": "data/models/",
         "auto_download": true
     },
@@ -93,7 +89,7 @@
     "api": {
         "rate_limit_per_min": 20,
         "cache_ttl_seconds": 300,
-        "smart_routing": true
+        "local_first": true
     },
 
     "update": {
