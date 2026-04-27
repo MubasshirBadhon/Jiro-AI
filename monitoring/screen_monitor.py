@@ -1,45 +1,43 @@
-"""Screen Monitor for Jiro AI.
+"""Screen Monitor - Captures screen + tracks active windows.
 
-Tracks active windows and takes periodic screenshots for context awareness.
-Provides productivity insights and enables proactive assistance.
+Tracks what the user is doing, categorizes activities,
+and provides context for the proactive assistant.
 """
 
 import asyncio
-import json
 import logging
 import platform
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Callable, Optional
 
-logger = logging.getLogger("jiro.monitoring.screen")
+logger = logging.getLogger("jiro.monitor.screen")
 
 SCREENSHOTS_DIR = Path(__file__).parent.parent / "data" / "recordings" / "screenshots"
 
 
 class ScreenMonitor:
-    """Monitors active windows and screen content for productivity tracking."""
+    """Monitors active windows and captures screenshots."""
 
-    def __init__(self, config_manager):
-        self.config = config_manager
-        self.enabled = config_manager.get("monitoring.enabled", True)
-        self.interval = config_manager.get("monitoring.screenshot_interval_seconds", 30)
+    def __init__(self, config: dict):
+        self._config = config
+        self.enabled = config.get("monitoring", {}).get("enabled", True)
+        self.interval = config.get("monitoring", {}).get("screenshot_interval_seconds", 30)
         self.is_running = False
         self._current_window = ""
-        self._window_start_time = time.time()
-        self._activity_callbacks: list[Callable] = []
-        self._last_window_log: dict = {}
+        self._window_start = time.time()
+        self._callbacks: list[Callable] = []
+        self._distraction_sites = config.get("monitoring", {}).get(
+            "distraction_sites", ["facebook.com", "instagram.com", "tiktok.com"])
 
-    def add_activity_callback(self, callback: Callable) -> None:
-        """Register a callback for activity changes."""
-        self._activity_callbacks.append(callback)
+    def on_activity_change(self, callback: Callable) -> None:
+        self._callbacks.append(callback)
 
     def get_active_window(self) -> str:
-        """Get the currently active window title."""
+        """Get currently active window title (cross-platform)."""
         system = platform.system()
-
         try:
             if system == "Windows":
                 import ctypes
@@ -49,131 +47,90 @@ class ScreenMonitor:
                 buf = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buf, length + 1)
                 return buf.value
-
             elif system == "Linux":
-                result = subprocess.run(
-                    ["xdotool", "getactivewindow", "getwindowname"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                return result.stdout.strip()
-
+                r = subprocess.run(["xdotool", "getactivewindow", "getwindowname"],
+                                   capture_output=True, text=True, timeout=5)
+                return r.stdout.strip()
             elif system == "Darwin":
-                script = '''
-                tell application "System Events"
-                    set frontApp to name of first application process whose frontmost is true
-                    return frontApp
-                end tell
-                '''
-                result = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True, text=True, timeout=5,
-                )
-                return result.stdout.strip()
-
-        except Exception as e:
-            logger.debug("Failed to get active window: %s", e)
-
+                script = 'tell app "System Events" to get name of first process whose frontmost is true'
+                r = subprocess.run(["osascript", "-e", script],
+                                   capture_output=True, text=True, timeout=5)
+                return r.stdout.strip()
+        except Exception:
+            pass
         return "Unknown"
 
-    def _categorize_window(self, title: str) -> str:
-        """Categorize a window title for productivity tracking."""
-        title_lower = title.lower()
-
-        productive_keywords = [
-            "vscode", "visual studio", "pycharm", "intellij",
-            "terminal", "cmd", "powershell", "jupyter",
-            "docs.google", "notion", "obsidian",
-            "stack overflow", "github", "gitlab",
-        ]
-
-        distraction_keywords = self.config.get("monitoring.distraction_sites", [])
-
-        study_keywords = [
-            "khan academy", "coursera", "udemy", "edx",
-            "arxiv", "wikipedia", "research",
-        ]
-
-        if any(kw in title_lower for kw in productive_keywords):
-            return "productive"
-        elif any(kw in title_lower for kw in distraction_keywords):
+    def categorize(self, title: str) -> str:
+        """Categorize window title."""
+        t = title.lower()
+        if any(s in t for s in self._distraction_sites):
             return "distraction"
-        elif any(kw in title_lower for kw in study_keywords):
+        productive = ["vscode", "visual studio", "pycharm", "terminal", "cmd",
+                       "powershell", "jupyter", "github", "gitlab", "stackoverflow"]
+        if any(s in t for s in productive):
+            return "productive"
+        study = ["khan academy", "coursera", "udemy", "wikipedia", "arxiv",
+                 "tutorial", "documentation", "learn"]
+        if any(s in t for s in study):
             return "study"
-        else:
-            return "neutral"
+        return "neutral"
 
     async def take_screenshot(self) -> Optional[str]:
-        """Take a screenshot and save it."""
         SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = SCREENSHOTS_DIR / f"screen_{timestamp}.png"
-
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fp = SCREENSHOTS_DIR / f"screen_{ts}.png"
         try:
             import mss
             with mss.mss() as sct:
-                sct.shot(output=str(filepath))
-            return str(filepath)
+                sct.shot(output=str(fp))
+            return str(fp)
         except ImportError:
             try:
-                subprocess.run(
-                    ["scrot", str(filepath)],
-                    capture_output=True, timeout=10,
-                )
-                if filepath.exists():
-                    return str(filepath)
+                subprocess.run(["scrot", str(fp)], capture_output=True, timeout=10)
+                if fp.exists():
+                    return str(fp)
             except FileNotFoundError:
                 pass
-        except Exception as e:
-            logger.debug("Screenshot failed: %s", e)
-
         return None
 
-    async def monitor_loop(self, on_activity_change: Optional[Callable] = None) -> None:
-        """Main monitoring loop - tracks active window changes."""
+    async def run(self) -> None:
+        """Main monitoring loop."""
         self.is_running = True
-        logger.info("Screen monitoring started (interval: %ds)", self.interval)
-
+        logger.info("Screen monitoring started")
         while self.is_running:
             try:
                 current = self.get_active_window()
-
                 if current != self._current_window:
-                    elapsed = time.time() - self._window_start_time
+                    elapsed = time.time() - self._window_start
                     if self._current_window and elapsed > 1:
-                        self._last_window_log = {
+                        activity = {
                             "window": self._current_window,
                             "duration": elapsed,
-                            "category": self._categorize_window(self._current_window),
+                            "category": self.categorize(self._current_window),
                             "timestamp": datetime.now().isoformat(),
                         }
-
-                        for callback in self._activity_callbacks:
+                        for cb in self._callbacks:
                             try:
-                                if asyncio.iscoroutinefunction(callback):
-                                    await callback(self._last_window_log)
+                                if asyncio.iscoroutinefunction(cb):
+                                    await cb(activity)
                                 else:
-                                    callback(self._last_window_log)
+                                    cb(activity)
                             except Exception as e:
-                                logger.error("Activity callback error: %s", e)
-
+                                logger.error("Callback error: %s", e)
                     self._current_window = current
-                    self._window_start_time = time.time()
-
+                    self._window_start = time.time()
                 await asyncio.sleep(self.interval)
-
             except Exception as e:
-                logger.error("Monitor loop error: %s", e)
+                logger.error("Monitor error: %s", e)
                 await asyncio.sleep(5)
 
     def stop(self) -> None:
         self.is_running = False
-        logger.info("Screen monitoring stopped")
 
-    def get_current_context(self) -> dict:
-        """Get current screen context for AI awareness."""
+    def get_context(self) -> dict:
         return {
             "active_window": self._current_window,
-            "window_category": self._categorize_window(self._current_window),
-            "time_on_current": time.time() - self._window_start_time,
+            "category": self.categorize(self._current_window),
+            "time_on_current_seconds": time.time() - self._window_start,
             "timestamp": datetime.now().isoformat(),
         }
